@@ -40,6 +40,7 @@ import {
 } from '@/store/titlebar-app-actions'
 import { $hideCodeDiffs, $toolViewMode, setHideCodeDiffs, setToolViewMode } from '@/store/tool-view'
 import { $toursEnabled, setToursEnabled } from '@/store/tours'
+import { $trajectoryCollapsedByDefault, setTrajectoryCollapsedByDefault } from '@/store/trajectory-disclosure'
 import {
   $translucency,
   beginTranslucencyPeek,
@@ -423,6 +424,7 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
   const reasoningCollapsedByDefault = useStore($reasoningCollapsedByDefault)
   const reasoningCollapsedShadowed = useStore($modeShadowed('reasoningCollapsedByDefault'))
   const interfaceMode = useStore($interfaceMode)
+  const trajectoryCollapsedByDefault = useStore($trajectoryCollapsedByDefault)
   const sessionListDensity = useStore($sessionListDensity)
   const tabStripDefault = useStore($tabStripDefault)
   const titlebarAppActionsSide = useStore($titlebarAppActionsSide)
@@ -1106,6 +1108,26 @@ export function AppearanceSettings({ subpage }: AppearanceSettingsProps = {}) {
               }
               description={withModeNote(a.reasoningCollapsedDesc, reasoningCollapsedShadowed)}
               title={a.reasoningCollapsedTitle}
+            />
+          )}
+
+          {show('chat-display') && (
+            <ListRow
+              action={
+                <SegmentedControl
+                  onChange={id => {
+                    triggerHaptic('selection')
+                    setTrajectoryCollapsedByDefault(id === 'on')
+                  }}
+                  options={[
+                    { id: 'off', label: t.common.off },
+                    { id: 'on', label: t.common.on }
+                  ]}
+                  value={trajectoryCollapsedByDefault ? 'on' : 'off'}
+                />
+              }
+              description={a.trajectoryCollapsedDesc}
+              title={a.trajectoryCollapsedTitle}
             />
           )}
 
