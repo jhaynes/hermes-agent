@@ -253,3 +253,33 @@ def test_dispatch_critical_pressure_still_runs_reclaim_bookkeeping(
     assert res.memory_pressure == "critical"
     assert row is not None
     assert row.status == "ready"
+
+
+@pytest.mark.parametrize('load1,enabled,expected', [(12., True, 1), (21., True, 0), (21., False, 3), (None, True, 3)])
+def test_load_admission_composes_with_memory_and_preserves_ready_work(
+    kanban_home, all_assignees_spawnable, monkeypatch, load1, enabled, expected,
+):
+    from gateway import system_load as load
+    (kanban_home / 'config.yaml').write_text(f'system_load:\n  enabled: {str(enabled).lower()}\n  dwell_seconds: 0\n')
+    sample = [load.LoadSample(100, load1, 10, 0)]
+    monkeypatch.setattr(load, 'sample_system_load', lambda: sample[0])
+    monkeypatch.setattr(kbd, '_system_memory_sample', lambda: {})
+    monkeypatch.setattr(kbd, '_worker_alive', lambda *args: True)
+    spawns = []
+    with kbc.connect() as conn:
+        tasks = [kb.create_task(conn, title=str(i), assignee='alice') for i in range(3)]
+        def spawn(task, workspace, board=None):
+            spawns.append(task.id)
+            return 42
+        result = kbd.dispatch_once(conn, spawn_fn=spawn)
+        assert len(result.spawned) == expected
+        assert all(kb.get_task(conn, tid).status == ('running' if tid in spawns else 'ready') for tid in tasks)
+        # Recovery admits remaining work; load never cancels existing workers.
+        sample[0] = load.LoadSample(300, 1., 10, 0)
+        kbd.dispatch_once(conn, spawn_fn=spawn, reconcile_orphans=False)
+        assert set(spawns) == set(tasks)
+        before = list(spawns)
+        kb.create_task(conn, title='above cap', assignee='alice')
+        sample[0] = load.LoadSample(301, 12., 10, 0)
+        kbd.dispatch_once(conn, spawn_fn=spawn, max_in_progress=1, reconcile_orphans=False)
+        assert spawns == before

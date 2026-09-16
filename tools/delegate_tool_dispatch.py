@@ -23,6 +23,9 @@ from tools.delegate_tool_results import _finalize_child_results
 
 logger = logging.getLogger("tools.delegate_tool")  # log-record parity with the origin module
 
+from tools.delegate_tool_admission import child_admission, deferred_result
+from tools.delegate_tool_config import delegation_load_status
+
 
 @dataclass
 class _Batch:
@@ -48,6 +51,7 @@ class _Batch:
     # Set on per-group units carved out by ``_dispatch_background``; None for the whole batch / ungrouped units.
     group: Optional[str] = None
     unit_id: Optional[str] = None  # the async registry id this unit runs under (``<call_id>-k`` for split calls)
+    request: Optional[dict] = None  # model-visible input only; never credential routing
 
     def owner_kwargs(self) -> Dict[str, Any]:
         """Steer/stop authority of the originating session, passed to every child run."""
@@ -58,7 +62,13 @@ class _Batch:
 
     def run_child(self, i: int, task: Dict[str, Any], child: Any) -> Dict[str, Any]:
         from tools.delegate_tool import _run_single_child
-        return _run_single_child(task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
+        child._load_admission_state = 'waiting'
+        try:
+            with child_admission.slot(lambda: delegation_load_status(self.max_children)):
+                child._load_admission_state = 'running'
+                return _run_single_child(task_index=i, goal=task["goal"], child=child, parent_agent=self.parent_agent, **self.owner_kwargs())
+        finally:
+            child._load_admission_state = 'finished'
 
 
 def _announce_batch(parent_agent, n_tasks: int, live_deleg_id: Optional[str]) -> None:
@@ -287,6 +297,11 @@ def _batch_progress_token(child_agents: List[Any]) -> tuple:
     # completes (same liveness signal as the compaction inactivity budget, PR #71508).
     parts = []
     in_tool = False
+    admission_states = [getattr(c, '_load_admission_state', None) for c in child_agents]
+    if 'waiting' in admission_states and 'running' not in admission_states:
+        # Only queued work remains: admission waiting is not a frozen model/tool.
+        # Never mask a genuinely frozen RUNNING sibling with a queued sibling.
+        return ('load-admission', time.monotonic()), False
     for c in child_agents:
         try:
             summary = c.get_activity_summary()
@@ -375,6 +390,7 @@ def _dispatch_unit(unit: _Batch, unit_id: Optional[str], slot_key: Optional[str]
         toolsets=None,  # metadata for the completion block only; subagents inherit the parent's toolsets
         role=unit.top_role, model=unit.creds["model"],
         runner=lambda: _execute_and_aggregate(unit, honor_parent_interrupt=False),
+        runner_manages_admission=True,
         interrupt_fn=_interrupt, delegation_id=unit_id, slot_key=slot_key,
         task_indexes=[i for (i, _, _) in unit.children] if len(unit.children) < len(unit.task_list) else None,
         progress_fn=lambda: _batch_progress_token(child_agents), **routing,
@@ -385,6 +401,26 @@ def _restore_parent_cancellation(unit: _Batch) -> None:
     arrived while async admission had them detached)."""
     for _, _, child in unit.children:
         _attach_child(unit.parent_agent, child)
+
+
+def _defer_batch(batch: _Batch) -> dict:
+    """Reject without orphaning the already-built children or their transcript handles."""
+    from tools.delegation_live_log import update_manifest_statuses
+    entries = []
+    for i, _, child in batch.children:
+        _detach_child(batch.parent_agent, child)
+        close = getattr(child, 'close', None)
+        if callable(close):
+            with _quiet('Deferred child close failed: %s'):
+                close()
+        entry = {'task_index': i, 'status': 'deferred'}
+        entries.append(entry)
+        if i < len(batch.live_writers) and batch.live_writers[i] is not None:
+            with _quiet('Deferred transcript finalize failed: %s'):
+                batch.live_writers[i].finalize(entry)
+    update_manifest_statuses(batch.live_deleg_id, entries)
+    return deferred_result(tasks=[t for _, t, _ in batch.children], context=batch.context, role=batch.top_role,
+                           **({'request': batch.request} if batch.request is not None else {}))
 
 def _dispatch_background(batch: _Batch) -> str:
     """Dispatch the call as independent async units (see ``_units_of``) and return the tool result JSON. Every unit
@@ -407,6 +443,7 @@ def _dispatch_background(batch: _Batch) -> str:
     units = _units_of(batch)
     dispatched: List[tuple[_Batch, str]] = []
     inline_results: List[dict] = []
+    deferred: List[dict] = []
     slot_key: Optional[str] = None
     for k, unit in enumerate(units):
         # One unit keeps the live-transcript directory's id so the returned delegation_id matches
@@ -423,6 +460,11 @@ def _dispatch_background(batch: _Batch) -> str:
             dispatched.append((unit, dispatch["delegation_id"]))
             continue
         _restore_parent_cancellation(unit)
+        if dispatch.get('status') == 'deferred' or delegation_load_status(batch.max_children).pressured:
+            if not dispatched:
+                return json.dumps(_defer_batch(batch), ensure_ascii=False)
+            deferred.append(_defer_batch(unit))
+            continue
         if not dispatched:
             logger.info(
                 "delegate_task: async pool at capacity (%s); running the whole batch synchronously instead.",
@@ -436,10 +478,14 @@ def _dispatch_background(batch: _Batch) -> str:
     payload = _dispatched_payload(batch, dispatched)
     if inline_results:
         payload["inline_results"] = inline_results
+    if deferred:
+        payload['deferred'] = deferred
     return json.dumps(payload, ensure_ascii=False)
 
 def _run_batch(batch: _Batch, background: bool) -> str:
     """Tool result JSON: a dispatch handle (background) or the joined combined results."""
+    if child_admission.at_capacity(delegation_load_status(batch.max_children)):
+        return json.dumps(_defer_batch(batch), ensure_ascii=False)
     if background:
         return _dispatch_background(batch)
     return json.dumps(_execute_and_aggregate(batch), ensure_ascii=False)

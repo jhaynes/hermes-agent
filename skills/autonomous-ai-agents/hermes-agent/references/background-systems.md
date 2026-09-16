@@ -23,6 +23,17 @@ Spawn a subagent with an isolated context + terminal session.
 
 Config: `delegation.*` in `config.yaml`.
 
+Optional `system_load.enabled` (default false) gates actual starts across delegation,
+scheduled cron and Kanban; it never changes tool schemas or accepted batch size.
+Elevated load halves delegation/cron concurrency (floor 1; unset cron becomes 2) and
+permits at most one Kanban spawn/tick. Critical load permits one delegation/cron lane
+and no new Kanban workers. Running work is not cancelled. A `deferred` delegation
+result preserves the request but means it has NOT run and is NOT queued: retry when
+capacity returns, never bypass via inline execution. This is per-process best effort,
+not a host-wide or zero-swap guarantee. Installing new code requires process restart;
+later `hermes config set system_load.enabled false` restores static admission live.
+Details: https://hermes-agent.nousresearch.com/docs/user-guide/configuration#load-adaptive-admission
+
 ### Cron (scheduled jobs)
 
 Durable scheduler — `cron/jobs.py` + `cron/scheduler.py`. Drive it via

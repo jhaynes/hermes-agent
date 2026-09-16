@@ -1794,7 +1794,9 @@ def _tick_spawn_budget(
                 "limiting to at most 1 new worker this tick"
             )
             spawn_budget = 1
-    return True, spawn_budget
+    from hermes_cli.kanban_load import load_spawn_budget
+    spawn_budget = load_spawn_budget(spawn_budget)
+    return spawn_budget != 0, spawn_budget
 
 
 def _lane_rows(conn: sqlite3.Connection, status: str) -> list[sqlite3.Row]:

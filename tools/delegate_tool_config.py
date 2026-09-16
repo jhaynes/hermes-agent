@@ -104,6 +104,23 @@ def _get_independent_completions() -> bool:
     completion messages that land as each finishes. Off = one consolidated message when the whole call is done."""
     return is_truthy_value(_cfg().get("independent_completions", False))
 
+
+def delegation_admission(base_cap, level, policy):
+    if not policy.enabled:
+        return base_cap
+    if level == 'critical':
+        return min(base_cap, 1)
+    if level == 'elevated':
+        return max(1, base_cap // policy.elevated_cap_divisor)
+    return base_cap
+
+
+def delegation_load_status(base_cap=None):
+    """Execution-only cap: never use for schemas or accepted batch size."""
+    from gateway.system_load import load_status
+    from tools.delegate_tool import _get_max_concurrent_children
+    return load_status('delegation', base_cap if base_cap is not None else _get_max_concurrent_children(), delegation_admission)
+
 def _get_worktree_isolation() -> bool:
     """delegation.worktree_isolation (bool, default False): each child gets its own
     git worktree off the parent's HEAD so parallel children never contend for one

@@ -87,6 +87,74 @@ sandboxes
 where the limit cannot be changed, startup continues without changing the
 limit.
 
+## Load-Adaptive Admission
+
+`system_load` optionally reduces **new** delegation children, Kanban worker spawns,
+and scheduled cron jobs when the host is busy. It defaults to **off**. After installing
+code that supports this feature, restart existing Hermes processes once to load it.
+Subsequent configuration edits are picked up at admission time without a restart:
+
+```bash
+hermes config set system_load.enabled true
+# Roll back to static admission (running work is unaffected):
+hermes config set system_load.enabled false
+```
+
+Settings belong to the active profile's `config.yaml`, not `.env`:
+
+```yaml
+system_load:
+  enabled: false
+  elevated_enter_ratio: 1.0
+  elevated_exit_ratio: 0.8
+  critical_enter_ratio: 2.0
+  critical_exit_ratio: 1.5
+  dwell_seconds: 120
+  swap_critical_pct: 90
+  elevated_cap_divisor: 2
+  unbounded_elevated_cap: 2
+  unbounded_critical_cap: 1
+```
+
+The ratio is one-minute load average divided by effective CPU count (affinity where
+available). Raw host metrics are cached for 30 seconds; profile policy and hysteresis
+are separate. Entry thresholds are **strictly greater than**: load 10 on 10 cores
+does not enter elevated. Critical also triggers when the elevated threshold is exceeded
+and swap used percentage is strictly above `swap_critical_pct`. Old swap alone never
+triggers pressure; however, a host idling with high swap enters critical as soon as load
+crosses the elevated threshold. Missing load or core data fails open (`unknown`).
+
+| Level | Delegation | Kanban | Scheduled cron |
+|---|---|---|---|
+| Elevated | Base divided by `elevated_cap_divisor`, floor 1 | At most 1 new worker/tick | Base divided by divisor, floor 1; unset base uses `unbounded_elevated_cap` |
+| Critical | 1 child | No new workers | 1 job; unset base uses `unbounded_critical_cap` |
+| OK / unknown / disabled | Original limits | Original memory guard and limits | Original limits |
+
+No adaptive cap exceeds a configured static base. Static precedence is unchanged:
+delegation uses config before its legacy environment fallback; cron uses its legacy
+environment setting before config. Invalid policy fields warn and use their defaults;
+thresholds must be ordered, exit below entry, dwell nonnegative, percentages in `(0,100]`,
+divisor an integer at least 2, and unbounded caps positive integers.
+
+Recovery needs both a ratio **below** the current tier's exit threshold and the minimum
+dwell in that tier. A critical-to-elevated transition starts a new elevated dwell.
+INFO `load-throttle:` messages occur on level changes, with load, cores, swap and sample
+age; repeated reads at the same level do not log. Runtime `load_status` also returns the
+effective cap and raw sample for diagnostics; there is no new TUI indicator.
+
+Accepted batches retain their original size and run children within the effective cap;
+tool schemas and cached prompts do not change with host load. At pressure capacity,
+delegation returns a retryable `deferred` result preserving the request: it **has not run
+and is not queued**. Retry after load recovers or children finish; do not bypass it with
+inline work. Already-accepted batch children and cron jobs can wait in-process before
+starting. Cron waits before acquiring its fire claim. A shrinking cap never kills running
+work; new starts wait until capacity is available, including across old executor pools.
+
+These are **per-process, per-profile best-effort gates**, not a host-global budget or a
+guarantee of zero swapping. Other apps and already-running subprocesses remain outside
+their control. Windows without load averages fails open. A host-wide admission ledger
+is a possible later extension, not part of this feature.
+
 ## Database Settings
 
 The `database:` section controls how Hermes opens its SQLite state database

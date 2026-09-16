@@ -42,6 +42,13 @@ Whichever provider a job resolves to, its provider-specific request settings (e.
 Cron-run sessions cannot recursively create more cron jobs. Hermes disables cron management tools inside cron executions to prevent runaway scheduling loops.
 :::
 
+## Load-adaptive parallelism
+
+Scheduled parallelism can opt into [load-adaptive admission](/user-guide/configuration#load-adaptive-admission).
+With defaults, elevated pressure bounds an unset worker limit to 2 jobs and critical to 1.
+Queued jobs wait before claiming their fire slot; already-running jobs finish normally.
+The gate is default-off and does not replace durable occurrence accounting.
+
 ## Creating scheduled tasks
 
 ### In chat with `/cron`

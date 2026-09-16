@@ -1229,6 +1229,19 @@ DEFAULT_CONFIG = {
         # "mem0", "hindsight", "holographic", "retaindb", "byterover".
         "provider": "",
     },
+    # Opt-in admission of new work; never cancels workers or changes tool schemas.
+    "system_load": {
+        "enabled": False,
+        "elevated_enter_ratio": 1.0,
+        "elevated_exit_ratio": 0.8,
+        "critical_enter_ratio": 2.0,
+        "critical_exit_ratio": 1.5,
+        "dwell_seconds": 120.0,
+        "swap_critical_pct": 90.0,
+        "elevated_cap_divisor": 2,
+        "unbounded_elevated_cap": 2,
+        "unbounded_critical_cap": 1,
+    },
     # Subagent delegation — override the provider:model used by delegate_task so children run on a
     # cheaper/faster model. Uses the same runtime provider resolution as CLI/gateway startup, so
     # every configured provider is supported.

@@ -3705,7 +3705,8 @@ def _submit_with_guard(job: dict, pool: concurrent.futures.ThreadPoolExecutor, p
 
     def _run_and_release(j=dispatched_job, ctx=_ctx):
         try:
-            return ctx.run(process_job, j)
+            from cron.scheduler_load import run_admitted
+            return ctx.run(run_admitted, process_job, j)
         finally:
             release_running_job(j["id"])
 

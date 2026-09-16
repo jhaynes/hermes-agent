@@ -17,6 +17,7 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional
 
 from hermes_constants import get_hermes_home
@@ -530,6 +531,7 @@ def _dispatch(
     origin_session_id: str, interrupt_fn: Optional[Callable[[], None]], max_async_children: int,
     progress_fn: Optional[Callable[[], tuple]], capacity_error: str, slot_key: Optional[str] = None,
     task_indexes: Optional[List[int]] = None,
+    runner_manages_admission: bool = False,
 ) -> Dict[str, Any]:
     """Shared dispatch core for single (``goals is None``) and batch units. Capacity check +
     record insert happen under ONE lock hold so concurrent dispatches can't both pass the check
@@ -542,6 +544,11 @@ def _dispatch(
     classify = _batch_status if is_batch else (lambda r: r.get("status") or "completed")
     crash_result = _batch_crash if is_batch else _single_crash
     dispatched_at = time.time()
+    from tools.delegate_tool_config import delegation_load_status
+    from tools.delegate_tool_admission import child_admission, deferred_result
+    from hermes_constants import hermes_home_key
+    load = delegation_load_status(max_async_children)
+    home = hermes_home_key()
     record: Dict[str, Any] = {
         "delegation_id": delegation_id, "goal": goal, **({"goals": list(goals)} if is_batch else {}),
         "context": context, "toolsets": list(toolsets) if toolsets else None, "role": role, "model": model,
@@ -551,12 +558,19 @@ def _dispatch(
         "status": "running", "dispatched_at": dispatched_at, "completed_at": None,
         "interrupt_fn": interrupt_fn, **({"is_batch": True} if is_batch else {}), "progress_fn": progress_fn,
         "slot_key": slot_key or delegation_id,
+        "admission_home": home,
         # Which of the call's ``goals`` this unit runs (None = all of them).
         **({"task_indexes": list(task_indexes)} if task_indexes is not None else {}),
         # Stale-monitor bookkeeping (see _stale_monitor_loop).
         "_progress_token": None, "_progress_ts": dispatched_at, "_interrupted_at": None}
     with _records_lock:
         active_slots = {r.get("slot_key") or r["delegation_id"] for r in _records.values() if r.get("status") in _ACTIVE_STATES}
+        profile_slots = {r.get('slot_key') or r['delegation_id'] for r in _records.values()
+                         if r.get('status') in _ACTIVE_STATES and r.get('admission_home') == home}
+        if load.pressured and record['slot_key'] not in profile_slots and (
+                len(profile_slots) >= load.effective_cap or child_admission.at_capacity(load)):
+            return deferred_result(**({'goals': goals} if is_batch else {'goal': goal}),
+                                   context=context, toolsets=toolsets, role=role, model=model)
         if record["slot_key"] not in active_slots and len(active_slots) >= max_async_children:
             return {"status": "rejected", "error": capacity_error}
         _records[delegation_id] = record
@@ -569,13 +583,14 @@ def _dispatch(
     def _worker() -> None:
         result: Dict[str, Any] = {}
         status = "error"
-        with _records_lock:
-            rec = _records.get(delegation_id)
-            if rec is not None:
-                # The stall clock starts when the runner starts; a unit queued behind a full pool is not stalled.
-                rec.update(_started=True, _progress_ts=time.time())
         try:
-            result = runner() or {}
+            with nullcontext() if runner_manages_admission else child_admission.slot(lambda: delegation_load_status(max_async_children)):
+                with _records_lock:
+                    rec = _records.get(delegation_id)
+                    if rec is not None:
+                        # Neither executor queueing nor load admission is a runner stall.
+                        rec.update(_started=True, _progress_ts=time.time())
+                result = runner() or {}
             status = classify(result)
         except Exception as exc:  # noqa: BLE001 — must never crash the worker
             logger.exception(f"Async delegation{label} %s crashed", delegation_id)
@@ -632,6 +647,7 @@ def dispatch_async_delegation_batch(
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN, delegation_id: Optional[str] = None,
     progress_fn: Optional[Callable[[], tuple]] = None, slot_key: Optional[str] = None,
     task_indexes: Optional[List[int]] = None,
+    runner_manages_admission: bool = False,
 ) -> Dict[str, Any]:
     """Dispatch a fan-out unit (a whole batch, or one ``group`` of a delegate_task call) as ONE
     background unit: ``runner`` runs its tasks and returns the combined ``{"results": [...],
@@ -649,7 +665,7 @@ def dispatch_async_delegation_batch(
         parent_session_id=parent_session_id, runner=runner,
         origin_ui_session_id=origin_ui_session_id, origin_session_id=origin_session_id,
         interrupt_fn=interrupt_fn, max_async_children=max_async_children, progress_fn=progress_fn, slot_key=slot_key,
-        task_indexes=task_indexes,
+        task_indexes=task_indexes, runner_manages_admission=runner_manages_admission,
         capacity_error=(
             f"Async delegation capacity reached ({max_async_children} running). Wait for one to finish "
             "(its result will re-enter the chat), or raise delegation.max_concurrent_children in "

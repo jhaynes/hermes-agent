@@ -484,6 +484,13 @@ def delegate_task(
         return tool_error(err)
 
     overall_start = time.monotonic()
+    from tools.delegate_tool_admission import child_admission, deferred_result
+    from tools.delegate_tool_config import delegation_load_status
+    request = {k: v for k, v in dict(goal=goal, context=context, tasks=tasks, role=role,
+               background=background, max_iterations=max_iterations, output_schema=output_schema, images=images).items()
+               if v is not None}
+    if child_admission.at_capacity(delegation_load_status(max_children)):
+        return json.dumps(deferred_result(tasks=task_list, context=context, request=request), ensure_ascii=False)
     # Live transcripts: cache/delegation/live/<id>/task-<n>.log per task, a side channel with zero effect on message
     # content or prompt caching. Best-effort: on failure live_paths is empty and delegation proceeds.
     from tools.delegation_live_log import create_live_transcripts
@@ -502,6 +509,7 @@ def delegate_task(
     batch = _Batch(
         task_list, children, parent_agent, creds, context, top_role, max_children,
         live_deleg_id, live_writers, live_paths, *origin, overall_start,
+        request=request,
     )
     return _run_batch(batch, background)
 
