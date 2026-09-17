@@ -61,4 +61,65 @@ toolset selection or prompt wording supplies a filesystem/network sandbox.
 
 ## Known readiness limits
 
-Read `.hermes/review-feedback-acceptance.json` and `.hermes/review-feedback-run2-result.json` in the builder worktree for exact-SHA evidence and remaining requirements; the original result files preserve run 1. The staged commands above are not evidence that live setup, sandbox enforcement, independent review, runtime compatibility, publication or deployment occurred.
+Read `.hermes/review-feedback-acceptance.json` and `.hermes/review-feedback-run3-result.json` in the builder worktree for exact-SHA evidence and remaining requirements; earlier result files preserve runs 1 and 2. The staged commands above are not evidence that live setup, sandbox enforcement, independent review, runtime compatibility, publication or deployment occurred.
+
+## Operator decision receipts (isolated implementation only)
+
+The existing `hermes kanban --board BOARD enroll-review TASK --receipt FILE`
+entry point also accepts a scoped decision receipt. This is a trusted operator
+boundary, not authentication of arbitrary code running as the account owner.
+Worker contexts are refused. Do not use this as live rollout authorization.
+
+Every decision includes `operation`, `attempt_id`, `expected_version`, `board_id`,
+`spec_digest`, `base_sha`, `target_sha`, `approved_by` (the recorded Justin
+decision), `decision` (its scoped text), and `findings` (every historical finding
+ID, including previously adjudicated findings). Read current identities from
+`show --json`; a stale version, different owner, live worker or running action
+refuses the transaction. Successful decisions never themselves reserve a launch.
+
+- `resume`: restores the recorded held phase without changing counters or policy.
+  Exhausted, uncertain-clock and unknown-history attempts cannot use this route.
+- `cancel`: parks the owner and cancels unlaunched reservations without refunding
+  recovery. Quiesce/reclaim live workers through the supported lifecycle first.
+- `amend`: adds `amendment: {ask, spec_digest}`; the digest must be SHA-256 of the
+  UTF-8 approved ask. It remains held, preserves original task text and counters,
+  and refuses an active/reserved frozen round. The old digest remains lineage
+  history, not permission to enroll a renamed copy.
+- `successor`: adds `successor: {task_id, base_sha, target_sha, allowance}`.
+  The named new task must be quiescent and unenrolled. `allowance` explicitly
+  specifies finite `rounds`, `recovery`, `active_seconds`; the old attempt stays
+  held/cancelled with its counters intact. The successor has a new attempt UUID,
+  immutable policy, and durable predecessor link. Original findings remain in
+  subsequent review briefs. No predecessor can authorize two successors.
+- `reject_finding`: adds `disposition: {finding_id, evidence}` after a settled
+  review. Original lane receipts are retained unchanged. A later reviewer may
+  cite `rejected` only when this separate parent disposition exists; the
+  disposition does not turn the old round into a clean approval.
+
+These actions do not close the remaining runtime-compatibility or migration
+contracts. In particular, the legacy three-integer compatibility assertion is
+still inadequate for deployment; verified CLI/gateway/dashboard writer receipts
+and legacy-history adjudication remain implementation blockers in the ledger.
+
+## Typed lane evidence
+
+`verification_run` is a nonempty list of typed evidence objects. Evidence is
+either `{kind: executed, command: TEXT, result: TEXT}` or
+`{kind: reasoned, reasoning: TEXT}`. A reasoning record never claims a test ran.
+Each finding supplies `severity` (`critical`, `high`, `medium`, `low`),
+`location: {path: REPO_RELATIVE_PATH, line: POSITIVE_INTEGER}`, typed `evidence`,
+and `required_change`. The receiver generates the finding ID and provenance from
+the actual attempt/board/run/round/mandate and snapshot; callers do not author
+those provenance fields. Prior closures contain `finding_id`, `status`
+(`open`, `closed`, or parent-authorized `rejected`), and typed `evidence`.
+Duplicate closures, unsupported severities, ambiguous execution claims and
+approve-with-actionable-findings invalidate the lane. This validates structure
+and recorded authority, not the semantic truth of an arbitrary review narrative.
+
+The subprocess pilots seed synthetic public-catalog metadata inside disposable
+profile homes and forbid non-loopback sockets. This prevents CLI cost-guard
+catalog startup from silently depending on a public API. CLI/agent/request/tool
+execution is real; catalog entries and endpoint responses are labeled fixtures.
+Reviewer construction excludes delegation, task creation and cron tools, and
+direct delegation/task-create calls are also refused. Local terminal access is
+still not an OS security sandbox; isolated probes remain mandatory.

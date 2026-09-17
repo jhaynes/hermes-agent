@@ -86,6 +86,9 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
     if phase == 'review':
         run=kb.claim_task(conn,owner)
         assert run is not None
+        cohort.record_runtime_route(conn, owner, run.current_run_id,
+            provider='openai' if implementer == 'openai' else 'anthropic',
+            model='gpt-5' if implementer == 'openai' else 'claude-sonnet-4-5', isolated=False)
         assert kb.request_review(conn,owner,expected_run_id=run.current_run_id)
     lanes={}
     for name in attempt['roster']:
@@ -95,7 +98,7 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
     if phase == 'review':
         cohort.start_cohort(conn,owner,lanes=lanes,expected_version=1)
     monkeypatch.setattr(dispatch,'_resolve_hermes_argv',lambda:[sys.executable,str(root/'tests/hermes_cli/kanban_worker_probe.py'),str(root)])
-    monkeypatch.setattr(dispatch,'_resolve_worker_cli_toolsets',lambda _:['kanban'])
+    monkeypatch.setattr(dispatch,'_resolve_worker_cli_toolsets',lambda _:['kanban','delegation'])
     monkeypatch.setattr(dispatch,'_profile_exists_fn',lambda:lambda p:p=='reviewer')
     try:
         result=dispatch.dispatch_once(conn,max_spawn=1)
@@ -127,6 +130,9 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
             assert route is not None, 'Actual implementer routing must be recorded, not just declared at enrollment'
             assert route['maker']=='anthropic', 'Actual worker construction must persist resolved maker before provider request'
             assert route['run_id']==kb.get_task(conn,task_id).current_run_id
+            if phase == 'review':
+                names = {tool['function']['name'] for tool in calls[0].get('tools', [])}
+                assert 'delegate_task' not in names, 'Reviewer construction must prohibit nested review workers'
             if revoke:
                 assert len(calls) == 1, 'SDK retry must recheck authorization at the actual HTTP send'
     finally:

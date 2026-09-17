@@ -24,6 +24,15 @@ def reject_decomposition(conn, task_id):
         raise ValueError('managed workflow cannot gain new dispatch authority through decomposition')
 
 
+def reject_nested_creation(conn, creator_task_id):
+    from hermes_cli.kanban_review_worker import restricted_worker
+    from hermes_cli.kanban_postmortem import is_diagnostic
+    if (restricted_worker() or (creator_task_id and (
+            conn.execute('SELECT 1 FROM review_members WHERE task_id=?', (creator_task_id,)).fetchone()
+            or is_diagnostic(conn, creator_task_id)))):
+        raise ValueError('nested task creation from managed review or diagnostic workers is prohibited')
+
+
 def identity_valid(conn, attempt):
     import hashlib
     import json

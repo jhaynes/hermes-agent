@@ -35,6 +35,8 @@ def initialize(conn):
             monotonic_at REAL NOT NULL, wall_at REAL NOT NULL)''')
         from hermes_cli.kanban_review_cohort import initialize as initialize_cohort
         initialize_cohort(conn)
+        from hermes_cli.kanban_review_operator import initialize as initialize_operator
+        initialize_operator(conn)
         if conn.execute('SELECT 1 FROM review_attempts LIMIT 1').fetchone():
             install_guard(conn)
 
@@ -141,7 +143,8 @@ def reserve_action(conn, task_id, *, category, expected_version, recovery=False)
 
 def hold(conn, attempt, reason):
     """Caller owns the transaction. The state gate is independent of task column."""
-    conn.execute("UPDATE review_attempts SET state='held',hold_reason=?,version=version+1 WHERE id=?", (reason, attempt['id']))
+    conn.execute("""UPDATE review_attempts SET resume_state=CASE WHEN state='held'
+        THEN resume_state ELSE state END,state='held',hold_reason=?,version=version+1 WHERE id=?""", (reason, attempt['id']))
     conn.execute("UPDATE tasks SET status='blocked',block_kind='needs_input' WHERE id=?", (attempt['task_id'],))
     from hermes_cli.kanban_db import _append_event
     _append_event(conn, attempt['task_id'], reason, {'attempt_id':attempt['id']})
@@ -292,7 +295,8 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
         from hermes_cli.kanban_db import _append_event
         if get_attempt(conn, task_id):
             raise ValueError('task already enrolled; new task/policy/spec is not reset authority')
-        if conn.execute('SELECT 1 FROM review_attempts WHERE spec_digest=?', (spec_digest,)).fetchone():
+        if (conn.execute('SELECT 1 FROM review_attempts WHERE spec_digest=?', (spec_digest,)).fetchone()
+                or conn.execute("SELECT 1 FROM review_decisions WHERE json_extract(receipt,'$.spec_digest')=?", (spec_digest,)).fetchone()):
             raise ValueError('managed ask already has a lineage; recreation is not successor authority')
         from hermes_cli.kanban_postmortem import is_diagnostic
         if is_diagnostic(conn, task_id):

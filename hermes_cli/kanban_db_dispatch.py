@@ -449,11 +449,17 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
     alone so a worker still finalising after its own transition is not killed.
     One row's failure (signal, /proc probe) is logged and skips only that row.
     Returns the task ids whose worker was terminated."""
+    from hermes_cli.kanban_review_state import supervision_deadlines
+    supervision_deadlines(conn)
+    now = time.time()
     rows = conn.execute(
-        "SELECT id, task_id, worker_pid, worker_started_at, claim_lock FROM task_runs "
-        "WHERE ended_at IS NOT NULL AND ended_at <= ? "
-        "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
-        (int(time.time()) - TERMINAL_WORKER_REAP_GRACE_SECONDS,),
+        "SELECT r.id, r.task_id, r.worker_pid, r.worker_started_at, r.claim_lock FROM task_runs r "
+        "LEFT JOIN review_actions a ON a.run_id=r.id "
+        "LEFT JOIN review_attempts w ON w.id=a.attempt_id "
+        "WHERE r.ended_at IS NOT NULL AND (r.ended_at <= ? "
+        "OR a.deadline <= ? OR w.state IN ('held','cancelled')) "
+        "AND r.worker_pid IS NOT NULL AND r.worker_started_at IS NOT NULL",
+        (int(now) - TERMINAL_WORKER_REAP_GRACE_SECONDS, now),
     ).fetchall()
     host_prefix = _kb._host_prefix()
     reaped: list[str] = []

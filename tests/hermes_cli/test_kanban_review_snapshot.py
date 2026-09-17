@@ -32,6 +32,7 @@ def test_completion_checks_actual_approved_snapshot(tmp_path, monkeypatch, mutat
             compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic')
         state.reserve_action(conn, owner, category='preflight', expected_version=0)
         run = kb.claim_task(conn, owner)
+        cohort.record_runtime_route(conn, owner, run.current_run_id, provider='openai', model='gpt-5', isolated=False)
         assert kb.request_review(conn, owner, expected_run_id=run.current_run_id)
         lanes = {name: {'profile': 'reviewer', 'provider': 'anthropic', 'model': 'claude-sonnet-4-5',
                         'workspace': str(tmp_path / name)} for name in attempt['roster']}
@@ -44,7 +45,7 @@ def test_completion_checks_actual_approved_snapshot(tmp_path, monkeypatch, mutat
             receipt = {key: attempt[key] for key in ('board_id', 'base_sha', 'target_sha', 'policy_digest', 'spec_digest')}
             receipt.update(attempt_id=attempt['id'], round_id=member['round_id'], mandate=member['mandate'],
                            task_id=task, run_id=run.current_run_id, verdict='approve', findings=[],
-                           verification_run=['synthetic receipt for completion-gate unit test'], prior_findings=[])
+                           verification_run=[{'kind':'reasoned','reasoning':'synthetic completion-gate unit test'}], prior_findings=[])
             assert kb.complete_task(conn, task, expected_run_id=run.current_run_id, metadata={'bounded_review': receipt})
         assert state.get_attempt(conn, owner)['state'] == 'approved'
         if mutation != 'none':

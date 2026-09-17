@@ -428,6 +428,10 @@ def delegate_task(
     if parent_agent is None:
         return tool_error("delegate_task requires a parent agent context.")
 
+    from hermes_cli.kanban_review_worker import restricted_worker
+    if restricted_worker():
+        return tool_error("Nested delegation from managed review or diagnostic workers is prohibited.")
+
     normalized_action = (action or "").strip().lower()
     if normalized_action in _CONTROL_ACTIONS:
         return _handle_control_action(normalized_action, subagent_id, message, parent_agent)

@@ -30,7 +30,8 @@ spec.loader.exec_module(m)
 findings = []
 def check(condition, evidence, change):
     if not condition:
-        findings.append({'severity': 'high', 'evidence': evidence, 'required_change': change})
+        findings.append({'severity': 'high', 'location': {'path': 'subject.py', 'line': 1},
+                         'evidence': {'kind': 'executed', 'command': 'fixture probe ' + mandate, 'result': evidence}, 'required_change': change})
 if mandate == 'breaker_a':
     try:
         m.count('-1')
@@ -99,6 +100,8 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
             steps[task] = step + 1
             if step == 0:
                 name, arguments = 'kanban_show', {'task_id': task}
+            elif card['mandate'] == 'preflight':
+                name, arguments = 'kanban_request_review', {'summary': 'Synthetic preflight complete'}
             elif step == 1:
                 command = shlex.join([sys.executable, str(probe), card['mandate'], card['workspace']])
                 name, arguments = 'terminal', {'command': command, 'timeout': 10}
@@ -134,9 +137,9 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
                     prior = cohort.prior_findings(control, attempt['id'], member['mandate'])
                 receipt.update(attempt_id=attempt['id'], round_id=member['round_id'], mandate=member['mandate'],
                     task_id=task, run_id=run_id, verdict='request_changes' if result['findings'] else 'approve',
-                    findings=result['findings'], verification_run=['Executed fixture probe: ' + member['mandate']],
+                    findings=result['findings'], verification_run=[{'kind':'executed', 'command':'fixture probe ' + member['mandate'], 'result':json.dumps(result)}],
                     prior_findings=[{'finding_id': f['finding_id'], 'status': 'open' if result['findings'] else 'closed',
-                                     'evidence': 'Re-executed fixture attack at the current SHA'} for f in prior])
+                                     'evidence': {'kind':'executed', 'command':'fixture probe ' + member['mandate'], 'result':json.dumps(result)}} for f in prior])
                 name, arguments = 'kanban_complete', {'summary': 'Executed isolated fixture probe', 'metadata': {'bounded_review': receipt}}
             call = {'id': 'call_' + str(step), 'type': 'function',
                     'function': {'name': name, 'arguments': json.dumps(arguments)}}
@@ -181,7 +184,8 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
     (repo / 'unrequested.txt').write_text('outside the ask\n')
     sha = base = commit()
     conn = connect(db)
-    owner = kb.create_task(conn, title='Reject negative counts; no additional files', assignee='builder', workspace_kind='dir', workspace_path=str(repo))
+    owner = kb.create_task(conn, title='Reject negative counts; no additional files', assignee='reviewer',
+        workspace_kind='dir', workspace_path=str(repo), model_override='openai/gpt-5', provider_override='openrouter')
     attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
         base_sha=base, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
@@ -193,8 +197,19 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
         for ordinal in range(1, 4):
             current = state.get_attempt(conn, owner)
             state.reserve_action(conn, owner, category='preflight', expected_version=current['version'])
-            run = kb.claim_task(conn, owner) if kb.get_task(conn, owner).status == 'ready' else kb.claim_review_task(conn, owner)
-            assert kb.request_review(conn, owner, expected_run_id=run.current_run_id)
+            cards[owner] = {'mandate': 'preflight'}
+            steps[owner] = 0
+            result = dispatch.dispatch_once(conn, max_spawn=1)
+            assert len(result.spawned) == 1 and result.spawned[0][0] == owner
+            until = time.monotonic() + 35
+            from hermes_cli.kanban_review_guards import has_live_worker
+            while time.monotonic() < until:
+                dispatch.reap_terminal_workers(conn)
+                if kb.get_task(conn, owner).status == 'review' and not has_live_worker(conn, attempt['id']):
+                    break
+                time.sleep(0.1)
+            assert kb.get_task(conn, owner).status == 'review', (kb.worker_logs_dir() / f'{owner}.log').read_text()
+            assert not has_live_worker(conn, attempt['id'])
             lanes = {}
             for mandate in attempt['roster']:
                 workspace = tmp_path / f'{ordinal}-{mandate}'

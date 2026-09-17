@@ -34,6 +34,8 @@ def test_cli_enrollment_reservation_and_worker_guard_round_trip(tmp_path, monkey
     assert json.loads(capsys.readouterr().out)['action_id']
     run=kb.claim_task(conn,task)
     assert run is not None
+    from hermes_cli import kanban_review_cohort as cohort
+    cohort.record_runtime_route(conn, task, run.current_run_id, provider='openai', model='gpt-5', isolated=False)
     assert kb.request_review(conn,task,expected_run_id=run.current_run_id)
     lanes={name:{'profile':'reviewer','provider':'anthropic','model':'claude-sonnet-4-5',
                  'workspace':str(tmp_path/name)} for name in receipt['roster']}

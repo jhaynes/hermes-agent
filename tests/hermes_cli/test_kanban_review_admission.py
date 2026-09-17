@@ -87,6 +87,7 @@ def test_handoff_cannot_pause_or_start_cohort_while_worker_is_live(tmp_path, mon
         state.reserve_action(conn, task, category='preflight', expected_version=0)
         assert len(dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1).spawned) == 1
         run_id = kb.get_task(conn, task).current_run_id
+        cohort.record_runtime_route(conn, task, run_id, provider='openai', model='gpt-5', isolated=False)
         assert kb.request_review(conn, task, expected_run_id=run_id)
         lanes = {name: {'profile': 'reviewer', 'provider': 'anthropic', 'model': 'claude-sonnet-4-5',
                         'workspace': str(tmp_path / name)} for name in attempt['roster']}

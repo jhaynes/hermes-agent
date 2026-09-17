@@ -15,6 +15,10 @@ def workflow_details(conn, task_id):
     if attempt:
         lanes=[dict(r) for r in conn.execute('SELECT task_id,round_id,mandate,state,run_id,maker FROM review_members WHERE attempt_id=? ORDER BY rowid DESC LIMIT 50',(attempt['id'],))]
         actions=[dict(r) for r in conn.execute('SELECT id,ordinal,category,recovery,state,run_id,deadline FROM review_actions WHERE attempt_id=? ORDER BY rowid DESC LIMIT 64',(attempt['id'],))]
+        attempt['decisions'] = [json.loads(r[0]) for r in conn.execute(
+            'SELECT receipt FROM review_decisions WHERE attempt_id=? ORDER BY version', (attempt['id'],))]
+        attempt['lineage'] = [dict(r) for r in conn.execute(
+            'SELECT * FROM review_successors WHERE predecessor_id=? OR successor_id=?', (attempt['id'],attempt['id']))]
     rows=[dict(r) for r in conn.execute('SELECT id,state,report_status,lesson_status,classification FROM workflow_incidents WHERE task_id=? ORDER BY rowid DESC LIMIT 21',(owner,))]
     return {'attempt':attempt,'lanes':lanes,'actions':actions,'incidents':rows[:20],'incidents_has_more':len(rows)>20}
 

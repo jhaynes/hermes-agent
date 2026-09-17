@@ -20,6 +20,11 @@ def seed_review_worker_catalog():
                 "max_completion_tokens": 4096,
                 "pricing": {"prompt": "0.000001", "completion": "0.000001"},
             },
+            "openai/gpt-5": {
+                "name": "Synthetic implementer model", "context_length": 200000,
+                "max_completion_tokens": 4096,
+                "pricing": {"prompt": "0.000001", "completion": "0.000001"},
+            },
         }))
 
     return seed

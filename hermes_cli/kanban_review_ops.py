@@ -21,6 +21,12 @@ def _object_file(path):
 def enroll(args):
     from hermes_cli.kanban_review_state import enroll_review
     receipt=_object_file(args.receipt)
+    if 'operation' in receipt:
+        from hermes_cli.kanban_review_operator import decide
+        with connect_closing() as conn:
+            result = decide(conn, args.task_id, receipt)
+        print(json.dumps(result, sort_keys=True))
+        return 0
     fields={'expected_status','expected_run_id','board_id','spec_digest','base_sha','target_sha',
             'implementer_maker','roster','consumed','compatibility','decision'}
     if set(receipt)!=fields:

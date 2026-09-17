@@ -20,6 +20,8 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
     state.reserve_action(conn, owner, category='preflight', expected_version=0)
     run = kb.claim_task(conn, owner)
     assert run is not None
+    from hermes_cli import kanban_review_cohort as cohort
+    cohort.record_runtime_route(conn, owner, run.current_run_id, provider='openai', model='gpt-5', isolated=False)
     assert kb.request_review(conn, owner, summary='preflight complete', expected_run_id=run.current_run_id)
     assert importlib.util.find_spec('hermes_cli.kanban_review_cohort'), 'Whole-cohort routing is missing'
     from hermes_cli import kanban_review_cohort as cohort
@@ -36,13 +38,15 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
         assert lane_run is not None
         cohort.record_runtime_route(conn, card['task_id'], lane_run.current_run_id,
                                     provider='anthropic', model='claude-sonnet-4-5', isolated=True)
-        findings = [{'severity':'high','evidence':'executed synthetic probe','required_change':'remove unrelated behavior'}] if scope_changes and card['mandate']=='scope' else []
+        findings = [{'severity':'high', 'location':{'path':'subject.py','line':1},
+                     'evidence':{'kind':'reasoned','reasoning':'synthetic unit-test finding'},
+                     'required_change':'remove unrelated behavior'}] if scope_changes and card['mandate']=='scope' else []
         receipt = {'attempt_id':attempt['id'],'board_id':attempt['board_id'],'round_id':round_id,
                    'task_id':card['task_id'],'run_id':lane_run.current_run_id,
                    'base_sha':attempt['base_sha'],'target_sha':attempt['target_sha'],
                    'policy_digest':attempt['policy_digest'],'spec_digest':attempt['spec_digest'],
                    'mandate':card['mandate'],'verdict':'request_changes' if findings else 'approve',
-                   'findings':findings,'verification_run':['isolated synthetic attack'], 'prior_findings':[]}
+                   'findings':findings,'verification_run':[{'kind':'reasoned','reasoning':'synthetic unit-test review'}], 'prior_findings':[]}
         assert kb.complete_task(conn, card['task_id'], expected_run_id=lane_run.current_run_id,
                                 metadata={'bounded_review':receipt})
         if card['mandate'] != 'scope':
@@ -69,6 +73,7 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
         state.reserve_action(conn,owner,category='preflight',expected_version=updated['version'])
         preflight=kb.claim_review_task(conn,owner)
         assert preflight is not None
+        cohort.record_runtime_route(conn, owner, preflight.current_run_id, provider='openai', model='gpt-5', isolated=False)
         assert kb.request_review(conn,owner,expected_run_id=preflight.current_run_id)
         updated=state.get_attempt(conn,owner)
         next_round=cohort.start_cohort(conn,owner,lanes=lanes,expected_version=updated['version'])
@@ -102,6 +107,8 @@ def test_failed_cohort_replacements_share_recovery_and_cancel_unlaunched_lanes(t
         consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic')
     state.reserve_action(conn,owner,category='preflight',expected_version=0)
     run=kb.claim_task(conn,owner)
+    from hermes_cli import kanban_review_cohort as cohort
+    cohort.record_runtime_route(conn, owner, run.current_run_id, provider='openai', model='gpt-5', isolated=False)
     assert kb.request_review(conn,owner,expected_run_id=run.current_run_id)
     from hermes_cli import kanban_review_cohort as cohort
     lanes={name:{'profile':'reviewer','model':'claude-sonnet-4-5','provider':'anthropic','workspace':str(tmp_path/name)} for name in attempt['roster']}

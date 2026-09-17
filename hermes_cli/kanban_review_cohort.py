@@ -41,6 +41,18 @@ def start_cohort(conn, task_id, *, lanes, expected_version, recovery=False):
         if has_live_worker(conn, attempt['id']) or conn.execute("SELECT 1 FROM review_actions WHERE attempt_id=? AND state IN ('running','reserved')", (attempt['id'],)).fetchone():
             raise ValueError('quiescent boundary required')
         ordinal = attempt['completed_rounds'] + 1
+        route = conn.execute('''SELECT e.payload FROM task_events e
+            JOIN review_actions a ON a.run_id=e.run_id AND a.task_id=e.task_id
+            WHERE a.attempt_id=? AND a.ordinal=? AND a.category='preflight'
+              AND a.state='complete' AND e.kind='runtime_route_verified'
+            ORDER BY e.id DESC LIMIT 1''', (attempt['id'], ordinal)).fetchone()
+        receipt = json.loads(route[0]) if route else {}
+        expected = {key: attempt[key] for key in
+                    ('board_id', 'spec_digest', 'policy_digest', 'base_sha', 'target_sha')}
+        expected.update(attempt_id=attempt['id'], task_id=task_id, maker=attempt['implementer_maker'])
+        if (not all(receipt.get(k) == v for k, v in expected.items())
+                or model_maker(receipt.get('provider'), receipt.get('model', '')) != attempt['implementer_maker']):
+            raise ValueError('verified implementer runtime receipt for this preflight required')
         prior = conn.execute('SELECT * FROM review_rounds WHERE attempt_id=? AND ordinal=? ORDER BY recovery DESC LIMIT 1', (attempt['id'],ordinal)).fetchone()
         if recovery:
             if not prior or prior['state'] != 'invalid':
@@ -63,12 +75,28 @@ def start_cohort(conn, task_id, *, lanes, expected_version, recovery=False):
                      (round_id,attempt['id'],ordinal,used,'running',attempt['base_sha'],attempt['target_sha']))
         conn.execute("UPDATE review_attempts SET state='reviewing',recovery_used=?,version=version+1 WHERE id=?", (used,attempt['id']))
         conn.execute('UPDATE tasks SET assignee=NULL WHERE id=?', (task_id,))
+        from hermes_cli.kanban_review_operator import approved_ask
+        ask = kb.redact_review_value(approved_ask(conn, attempt))
         for mandate, lane in lanes.items():
             child = kb.create_task(conn, title=f'Bounded review: {mandate}',
                 body=json.dumps({'attempt_id':attempt['id'],'round_id':round_id,'mandate':mandate,
                                  'base_sha':attempt['base_sha'],'target_sha':attempt['target_sha'],
                                  'spec_digest':attempt['spec_digest'],'policy_digest':attempt['policy_digest'],
                                  'owner_task_id':task_id,'evidence_is_data':True,
+                                 'approved_ask':ask,
+                                 'receipt_contract':{
+                                     'metadata_key':'bounded_review',
+                                     'identity':'Echo the pinned board/attempt/round/task/run/mandate and base/target/spec/policy fields.',
+                                     'verdict':['approve','request_changes'],
+                                     'evidence_kinds':['executed','reasoned'],
+                                     'executed_evidence':{'kind':'executed','command':'actual command','result':'observed result'},
+                                     'reasoned_evidence':{'kind':'reasoned','reasoning':'explicitly unexecuted analysis'},
+                                     'finding_fields':['severity','location','evidence','required_change'],
+                                     'severity':['critical','high','medium','low'],
+                                     'location':{'path':'repository-relative path','line':'positive integer'},
+                                     'verification_run':'Nonempty list of typed evidence objects.',
+                                     'prior_findings':'One finding_id/status/evidence entry per prior finding; rejected requires parent disposition.',
+                                 },
                                  'prior_findings':prior_findings(conn,attempt['id'],mandate)}),
                 assignee=lane['profile'], workspace_kind='dir', workspace_path=lane['workspace'],
                 model_override=lane['model'], provider_override=lane['provider'],
@@ -119,12 +147,19 @@ def record_runtime_route(conn, task_id, run_id, *, provider, model, isolated):
 
 
 def prior_findings(conn, attempt_id, mandate):
-    rows=conn.execute('''SELECT m.receipt FROM review_members m JOIN review_rounds r ON r.id=m.round_id
-        WHERE m.attempt_id=? AND m.mandate=? AND r.state='valid_changes' ORDER BY r.ordinal''',(attempt_id,mandate)).fetchall()
+    rows=conn.execute('''WITH RECURSIVE lineage(id) AS (
+        SELECT ? UNION SELECT s.predecessor_id FROM review_successors s JOIN lineage l ON s.successor_id=l.id)
+        SELECT m.receipt FROM review_members m JOIN review_rounds r ON r.id=m.round_id
+        WHERE m.attempt_id IN (SELECT id FROM lineage) AND m.mandate=?
+        AND r.state='valid_changes' ORDER BY r.rowid''',(attempt_id,mandate)).fetchall()
     findings={}
     for row in rows:
         for finding in json.loads(row['receipt'])['findings']:
             findings[finding['finding_id']]=finding
+    for finding in findings.values():
+        disposition = conn.execute('SELECT receipt FROM review_dispositions WHERE finding_id=?', (finding['finding_id'],)).fetchone()
+        if disposition:
+            finding['disposition'] = json.loads(disposition[0])
     return list(findings.values())
 
 
@@ -144,28 +179,30 @@ def receive(conn, task_id, run_id, receipt):
     valid = isinstance(receipt, dict) and all(receipt.get(k)==v for k,v in expected.items())
     valid = valid and member['run_id']==run_id and member['maker'] not in {None,attempt['implementer_maker']} and member['isolated']==1
     if valid:
+        from hermes_cli.kanban_review_evidence import receipt_evidence_valid
         findings = receipt.get('findings')
         valid = (receipt.get('verdict') in {'approve','request_changes'} and isinstance(findings,list)
-                 and isinstance(receipt.get('verification_run'),list) and bool(receipt['verification_run'])
-                 and isinstance(receipt.get('prior_findings'),list)
+                 and receipt_evidence_valid(receipt)
                  and not (receipt['verdict']=='approve' and findings)
-                 and all(isinstance(f,dict) and all(f.get(k) for k in ('severity','evidence','required_change')) for f in findings)
                  and len(json.dumps(receipt)) <= 32768)
     if valid:
-        previous={f['finding_id'] for f in prior_findings(conn,attempt['id'],member['mandate'])}
+        prior = prior_findings(conn,attempt['id'],member['mandate'])
+        previous={f['finding_id'] for f in prior}
+        rejected={f['finding_id'] for f in prior if f.get('disposition',{}).get('status')=='rejected'}
         closures=receipt['prior_findings']
         valid=(all(isinstance(c,dict) and c.get('finding_id') in previous
-                   and c.get('status') in {'open','closed'} and c.get('evidence') for c in closures)
+                   and (c.get('status') in {'open','closed'} or (c.get('status')=='rejected' and c['finding_id'] in rejected))
+                   and c.get('evidence') for c in closures)
                and {c['finding_id'] for c in closures}==previous)
         if valid and receipt['verdict']=='approve':
-            valid=all(c['status']=='closed' for c in closures)
+            valid=all(c['status'] in {'closed','rejected'} for c in closures)
     safe = None
     if valid:
         try:
             safe = kb.redact_review_value(receipt)
             for finding in safe['findings']:
-                finding.pop('finding_id',None)
-                finding['finding_id']=hashlib.sha256(json.dumps(finding,sort_keys=True).encode()).hexdigest()
+                finding['finding_id']=hashlib.sha256(json.dumps([expected, finding],sort_keys=True).encode()).hexdigest()
+                finding['provenance'] = expected
         except Exception:
             valid = False
     terminal = 'received_valid' if valid else 'invalid'
@@ -197,6 +234,16 @@ def released(conn, task_id, run_id, outcome):
 
 def aggregate(conn, attempt, round_id):
     from hermes_cli import kanban_review_state as state
+    current = state.get_attempt(conn, attempt['task_id'])
+    if (not current or current['id'] != attempt['id'] or current['state'] != 'reviewing'
+            or current['version'] != attempt['version']):
+        return
+    round_row = conn.execute('SELECT * FROM review_rounds WHERE id=?', (round_id,)).fetchone()
+    if (not round_row or round_row['attempt_id'] != current['id']
+            or round_row['ordinal'] != current['completed_rounds'] + 1
+            or round_row['base_sha'] != current['base_sha']
+            or round_row['target_sha'] != current['target_sha']):
+        return
     members = conn.execute('SELECT state,receipt FROM review_members WHERE round_id=?', (round_id,)).fetchall()
     if len(members) != len(attempt['roster']) or any(m['state'] != 'received_valid' for m in members):
         return

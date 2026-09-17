@@ -11,6 +11,27 @@ import time
 from pathlib import Path
 
 
+def restricted_worker():
+    """Reviewer/diagnostic identity is board-owned, not a requested toolset."""
+    task_id = os.environ.get('HERMES_KANBAN_TASK')
+    db_path = os.environ.get('HERMES_KANBAN_DB')
+    if not task_id or not db_path:
+        return False
+    from hermes_cli.kanban_db_connect import connect_closing
+    from hermes_cli.kanban_postmortem import is_diagnostic
+    with connect_closing(Path(db_path)) as conn:
+        return bool(conn.execute('SELECT 1 FROM review_members WHERE task_id=?', (task_id,)).fetchone()
+                    or is_diagnostic(conn, task_id))
+
+
+def construction_tools(tools):
+    # Initial snapshot only. This is not a filesystem/network sandbox.
+    if not restricted_worker():
+        return tools
+    return [tool for tool in tools if tool['function']['name'] not in
+            {'delegate_task', 'kanban_create', 'cronjob'}]
+
+
 def before_model_request(agent, request):
     task_id = os.environ.get('HERMES_KANBAN_TASK')
     db_path = os.environ.get('HERMES_KANBAN_DB')
