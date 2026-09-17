@@ -57,6 +57,16 @@ def inspect_history(conn, task_id):
 
 
 def _quiescent(conn, task_id, observed):
+    from hermes_cli.kanban_db import _host_prefix
+    from hermes_cli.kanban_db_dispatch import _worker_alive
+    runs = list(observed['history']['runs'])
+    for child in observed['history']['children']:
+        runs.extend(child['runs'])
+    for run in runs:
+        if run['worker_pid'] is not None and (
+                not (run['claim_lock'] or '').startswith(_host_prefix())
+                or _worker_alive(run['worker_pid'],run['worker_started_at'])):
+            raise ValueError('legacy adjudication requires physical quiescence')
     if observed['expected_run_id'] is not None or observed['history']['worker_pid'] is not None:
         raise ValueError('legacy adjudication requires owner quiescence')
     if observed['status'] not in {'ready','blocked','done','scheduled'}:

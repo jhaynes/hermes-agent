@@ -32,6 +32,32 @@ def test_clean_legacy_review_is_still_a_consumed_round(tmp_path, monkeypatch):
         assert observed['lower_bounds']['rounds'] == 1
 
 
+def test_closed_run_with_live_process_is_not_a_safe_boundary(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from hermes_cli.kanban_db_dispatch import _set_worker_pid
+    from hermes_cli.kanban_review_legacy import adjudicate, inspect_history
+    monkeypatch.delenv('HERMES_KANBAN_TASK',raising=False)
+    worker = subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)'])
+    try:
+        with connect(tmp_path/'board.db') as conn:
+            task = kb.create_task(conn,title='finishing process',assignee='builder')
+            run = kb.claim_task(conn,task)
+            _set_worker_pid(conn,task,worker.pid)
+            assert kb.complete_task(conn,task,expected_run_id=run.current_run_id)
+            observed = inspect_history(conn,task)
+            receipt = {**enrollment(conn), 'operation':'legacy-history','disposition':'enroll',
+                       'expected_status':observed['status'], 'history_digest':observed['history_digest'],
+                       'spec_digest':observed['spec_digest'], 'approved_by':'Justin',
+                       'compatibility':writer_receipts(conn),'consumed':{'rounds':1,'recovery':0,'active_seconds':30}}
+            with pytest.raises(ValueError,match='physical quiescence'):
+                adjudicate(conn,task,receipt)
+            assert state.get_attempt(conn,task) is None
+    finally:
+        worker.terminate()
+        worker.wait(timeout=5)
+
+
 def test_preserved_conservative_counts_cannot_be_reduced(tmp_path, monkeypatch):
     from hermes_cli.kanban_review_legacy import adjudicate, inspect_history
     monkeypatch.delenv('HERMES_KANBAN_TASK',raising=False)
