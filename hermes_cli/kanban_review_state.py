@@ -175,7 +175,7 @@ def released(conn, task_id, run_id, outcome, metadata=None):
     from hermes_cli.kanban_workflow_lessons import failed as validation_failed
     validation_failed(conn,task_id,outcome)
     from hermes_cli.kanban_postmortem import released as diagnostic_released
-    diagnostic_released(conn, task_id, run_id, outcome)
+    diagnostic_released(conn, task_id, run_id, outcome, metadata)
     attempt = get_attempt(conn, task_id)
     if attempt is not None:
         settle_clock(conn, attempt)

@@ -109,6 +109,9 @@ def adjudicate(conn, task_id, receipt):
     if any(not isinstance(receipt[k],str) or not re.fullmatch('[0-9a-f]{40}',receipt[k]) for k in ('base_sha','target_sha')):
         raise ValueError('exact legacy base and target required')
     with write_txn(conn):
+        from hermes_cli.kanban_postmortem import is_diagnostic
+        if is_diagnostic(conn, task_id):
+            raise ValueError('diagnostic tasks cannot be adjudicated as legacy implementation work')
         if state.get_attempt(conn, task_id):
             raise ValueError('managed lineage cannot be adjudicated as legacy')
         observed = inspect_history(conn, task_id)

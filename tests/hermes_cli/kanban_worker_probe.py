@@ -10,6 +10,12 @@ root = Path(sys.argv.pop(1)).resolve()
 sys.path.insert(0, str(root))
 import hermes_cli.kanban_db as kb
 
+if '--redaction-unavailable' in sys.argv:
+    sys.argv.remove('--redaction-unavailable')
+    def unavailable_redactor(*args, **kwargs):
+        raise RuntimeError('synthetic redactor unavailable')
+    kb.redact_review_value = unavailable_redactor
+
 assert Path(kb.__file__).resolve().is_relative_to(root), kb.__file__
 print(f"worker_boot pid={os.getpid()} source={kb.__file__}", flush=True)
 faulthandler.dump_traceback_later(20, repeat=True)

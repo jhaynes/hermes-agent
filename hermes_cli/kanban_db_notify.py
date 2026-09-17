@@ -377,6 +377,15 @@ def claim_unseen_events_for_sub(
         if not events:
             return old_cursor, old_cursor, []
         _cas_cursor(conn, _sub_key(task_id, platform, chat_id, thread_id), new_cursor, old_cursor)
+        # Delivery admission and acknowledgment serialize on this transaction.
+        # An already admitted network send cannot be recalled, but a later tick
+        # must not deliver a queued notice for an acknowledged episode.
+        events = [ev for ev in events if not (
+            ev.kind == 'postmortem_report' and isinstance(ev.payload, dict)
+            and conn.execute('''SELECT 1 FROM workflow_incident_dispositions d
+                JOIN workflow_incidents i ON i.id=d.incident_id
+                WHERE i.id=? AND i.task_id=? AND json_extract(d.receipt,'$.state')='acknowledged' ''',
+                (ev.payload.get('incident_id'), task_id)).fetchone())]
         return old_cursor, new_cursor, events
 
 

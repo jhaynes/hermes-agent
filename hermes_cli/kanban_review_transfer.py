@@ -17,6 +17,13 @@ def park_snapshot(conn, *, new_identity=False):
     conn.execute("UPDATE review_actions SET state='failed' WHERE state='running'")
     conn.execute("UPDATE review_actions SET state='cancelled' WHERE state='reserved'")
     conn.execute("""UPDATE tasks SET status='blocked',block_kind='needs_input'
+        WHERE id IN (SELECT task_id FROM workflow_postmortems UNION SELECT validator_task FROM workflow_lessons)
+        AND status NOT IN ('done','archived')""")
+    conn.execute("""UPDATE workflow_postmortems SET active_seconds=MAX(active_seconds,600),
+        started_monotonic=NULL,deadline=0 WHERE started_monotonic IS NOT NULL""")
+    conn.execute("UPDATE workflow_incidents SET report_status='synthesis_failed' WHERE report_status IN ('running','queued')")
+    conn.execute("UPDATE workflow_lessons SET status='pending_approval' WHERE status='proposed'")
+    conn.execute("""UPDATE tasks SET status='blocked',block_kind='needs_input'
         WHERE id IN (SELECT task_id FROM review_attempts UNION SELECT task_id FROM review_members)
         AND status NOT IN ('done','archived')""")
     if new_identity:

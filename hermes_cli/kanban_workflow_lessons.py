@@ -74,6 +74,9 @@ def receive(conn, task_id, run_id, receipt):
     lesson=conn.execute('SELECT * FROM workflow_lessons WHERE validator_task=?',(task_id,)).fetchone()
     if not lesson:
         return None
+    from hermes_cli.kanban_postmortem import supported
+    if not supported(conn, task_id=task_id):
+        return False
     if lesson['status']!='proposed' or receipt!={'source_event':lesson['source_event'],'result':'reproduced'}:
         return False
     validator=conn.execute('SELECT profile FROM task_runs WHERE id=? AND task_id=? AND ended_at IS NULL',(run_id,task_id)).fetchone()

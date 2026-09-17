@@ -2115,6 +2115,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            from hermes_cli.kanban_postmortem import is_diagnostic, claim_allowed as diagnostic_claim_allowed
+            if is_diagnostic(conn, task_id) and not diagnostic_claim_allowed(conn, task_id):
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue

@@ -89,6 +89,14 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
         return
     assert final['completed_rounds'] == 3
     assert final['state'] == ('held' if scope_changes else 'approved')
+    if scope_changes:
+        from hermes_cli.kanban_diagnostic_evidence import receipts
+        incident = conn.execute("SELECT * FROM workflow_incidents WHERE classification='failure' ORDER BY rowid DESC LIMIT 1").fetchone()
+        evidence = receipts(conn, incident)
+        reviews = [r for r in evidence.values() if r.get('kind') == 'review_receipt']
+        assert {r['mandate'] for r in reviews} == set(attempt['roster'])
+        scope = next(r for r in reviews if r['mandate'] == 'scope')
+        assert scope['verdict'] == 'request_changes' and scope['evidence'][0]['kind'] == 'reasoned'
     assert cohort.start_cohort(conn, owner, lanes=lanes, expected_version=final['version']) is None
     # These synthetic SHAs exercise cohort aggregation, not a real Git target.
     # Actual positive owner completion is covered by test_kanban_review_snapshot.

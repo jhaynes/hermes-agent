@@ -29,6 +29,8 @@ def initialize(conn):
             "INSERT OR IGNORE INTO workflow_board(singleton,board_id,schema_version) VALUES(1,?,1)",
             (str(uuid.uuid4()),),
         )
+        if conn.execute('SELECT schema_version FROM workflow_board WHERE singleton=1').fetchone()[0] != 1:
+            raise ValueError('unsupported workflow schema; owning runtime required')
         conn.execute("""CREATE TABLE IF NOT EXISTS workflow_incidents (
             id TEXT PRIMARY KEY, board_id TEXT NOT NULL, task_id TEXT NOT NULL,
             run_id INTEGER, episode_key TEXT NOT NULL UNIQUE,
@@ -139,13 +141,24 @@ def diagnose_unowned_queue(conn, stale_timeout_seconds):
     import time
     from hermes_cli import kanban_db as kb
     from hermes_cli.kanban_postmortem import is_diagnostic
+    from hermes_cli.kanban_db_dispatch import _profile_exists_fn
+    profile_exists = _profile_exists_fn()
     with write_txn(conn):
-        rows = conn.execute('''SELECT t.id, MAX(e.created_at) AS last_at FROM tasks t
-            JOIN task_events e ON e.task_id=t.id
-            WHERE t.status='ready' AND t.assignee IS NULL AND t.current_run_id IS NULL
-            GROUP BY t.id HAVING last_at < ? ORDER BY last_at LIMIT 16''',
-            (time.time() - stale_timeout_seconds,)).fetchall()
+        rows = conn.execute('''SELECT t.id,t.assignee, MAX(e.id) AS episode, MAX(e.created_at) AS last_at FROM tasks t
+            JOIN task_events e ON e.task_id=t.id AND e.kind IN
+                ('created','promoted','assigned','unblocked','status','claimed','reclaimed',
+                 'stale','crashed','timed_out','spawn_failed','review_reopened','changes_requested')
+            WHERE t.status='ready' AND t.current_run_id IS NULL
+            GROUP BY t.id HAVING last_at < ? AND MAX(e.id) > COALESCE(
+                (SELECT MAX(q.id) FROM task_events q WHERE q.task_id=t.id AND q.kind='queue_stalled'),0)
+            ORDER BY last_at''',
+            (time.time() - stale_timeout_seconds,))
+        captured = 0
         for row in rows:
-            last = conn.execute('SELECT kind FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1', (row['id'],)).fetchone()
-            if last['kind'] != 'queue_stalled' and not is_diagnostic(conn, row['id']):
+            if row['assignee'] and (profile_exists is None or profile_exists(row['assignee'])):
+                continue
+            if not is_diagnostic(conn, row['id']):
                 kb._append_event(conn, row['id'], 'queue_stalled', {'next_action': 'assign_owner'})
+                captured += 1
+                if captured == 16:
+                    break

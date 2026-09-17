@@ -4,7 +4,7 @@ from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli.kanban_db_connect import connect
 
 
-def test_stale_unowned_queue_is_diagnosed_once_without_changing_ownership(tmp_path):
+def test_stale_unowned_queue_is_diagnosed_once_without_changing_ownership(tmp_path, monkeypatch):
     with connect(tmp_path / 'board.db') as conn:
         task = kb.create_task(conn, title='unowned', assignee=None)
         with kb.write_txn(conn):
@@ -17,6 +17,25 @@ def test_stale_unowned_queue_is_diagnosed_once_without_changing_ownership(tmp_pa
         assert kb.get_task(conn, task).status == 'ready'
         dispatch.dispatch_once(conn, max_spawn=0, stale_timeout_seconds=10)
         assert conn.execute('SELECT COUNT(*) FROM workflow_incidents WHERE task_id=?', (task,)).fetchone()[0] == 1
+        kb.add_comment(conn, task, author='operator', body='unrelated update')
+        import time
+        now = time.time()
+        monkeypatch.setattr(time, 'time', lambda: now + 20)
+        dispatch.dispatch_once(conn, max_spawn=0, stale_timeout_seconds=10)
+        assert conn.execute('SELECT COUNT(*) FROM workflow_incidents WHERE task_id=?', (task,)).fetchone()[0] == 1, 'Comments cannot create another stale-queue episode'
+
+
+def test_stale_missing_profile_is_diagnosed_but_capacity_wait_is_not(tmp_path, monkeypatch):
+    monkeypatch.setattr(dispatch, '_profile_exists_fn', lambda: lambda p: p == 'available')
+    with connect(tmp_path / 'board.db') as conn:
+        missing = kb.create_task(conn, title='no successor', assignee='missing')
+        capacity = kb.create_task(conn, title='capacity wait', assignee='available')
+        with kb.write_txn(conn):
+            conn.execute('UPDATE task_events SET created_at=1')
+        dispatch.dispatch_once(conn, max_spawn=0, stale_timeout_seconds=10)
+        assert [r[0] for r in conn.execute('SELECT task_id FROM workflow_incidents')] == [missing]
+        assert kb.get_task(conn, missing).assignee == 'missing'
+        assert kb.get_task(conn, capacity).status == 'ready'
 
 
 def test_existing_priority_queue_cannot_guarantee_finite_diagnostic_service(tmp_path, monkeypatch):

@@ -39,7 +39,7 @@ homes, source-pinned CLI workers and a fail-closed loopback-only network bootstr
 ## Evidence and report contract
 
 `kanban_show` supplies `result_contract`, `section_enums`, `fact_contract`, bounded
-`evidence` and (for validators) a numeric `replay`. A reporter completes with
+`evidence`, bounded `receipts`, an `evidence_report_contract` and (for validators) a numeric `replay`. A reporter completes with
 `metadata.postmortem`; a validator uses `metadata.lesson_validation`.
 
 Report fields are exact: incident_id, owner, citations, facts, hypotheses,
@@ -56,8 +56,8 @@ recovery_recommendation, proposed_change and validation_needed. Limits are 32 Ki
 - Hypotheses are explicitly unverified categories: cause_unestablished,
   infrastructure_failure, deadline_exhaustion, admission_failure. Contributing
   conditions and missed gates use the enumerations returned by show. This initial
-  conservative schema does not accept arbitrary diagnostic prose or certify broad
-  causal analyses; wider evidence-backed synthesis remains an acceptance limitation.
+  categorical schema remains readable for existing reports. Schema 2 below supports
+  bounded narrative analysis without granting causal or execution authority.
 - Recovery recommendations are operator_investigation or operator_decision_required,
   never executable instructions. Validation needed is deterministic_replay,
   independent_reproduction or operator_decision.
@@ -67,6 +67,25 @@ recovery_recommendation, proposed_change and validation_needed. Limits are 32 Ki
   reviewer_change. They remain pending approval. Hypothesis-only reports cannot
   launch an automatically applicable lesson.
 
+Schema 2 adds `schema: 2` to the same fields and accepts event IDs plus `run:N` and
+`review:TASK` citations from `receipts`. Existing run `verification_run` records
+and the review cohort reserved before the incident supply test/reviewer evidence;
+later rounds cannot replace the old snapshot. Facts must exactly copy a cited
+observation. A reviewer reporting a finding is an observed receipt, not proof
+that the finding or its proposed cause is true. High observation confidence uses
+`cited_receipt_observation_only`. Causal certainty is never inferred automatically.
+
+Hypotheses, contributing conditions and missed gates are bounded objects with
+`claim`, `citations` and `status: unverified`. Recovery is an object with `action`,
+`citations` and `execution: operator_only`. Protected proposals may include a bounded
+`proposal`, but require `approval_required: true`. Hypothesis-only reports are valid;
+they cannot authorize automatic learning. Narrative fields are limited to 2048
+characters and checked at completion and publication. Evidence is limited to 32
+receipts / 16 KiB total, eight verification entries per receipt, and 8 KiB per
+receipt. Oversized sources and unavailable redaction omit evidence rather than
+forwarding raw data. Secret-bearing text fields are fully replaced, not partially
+masked. Raw comments and attachments are never fed to the diagnostic model.
+
 The validator independently receives and checks the recorded timeout comparison;
 the completion boundary repeats that deterministic comparison and verifies distinct
 run/profile provenance. It never replays commands from a log. A failed validator
@@ -74,19 +93,39 @@ cannot acquire another reservation through native/manual unblock.
 
 ## Time, retries and incidents
 
-A report has at most two synthesis claims and 600 cumulative active seconds.
+A report has one synthesis claim plus at most one infrastructure-only retry and
+600 cumulative active seconds. Spawn failure, an observed process signal, a quota
+exit or a supervisor-proven deadline can qualify; unknown exits, missing completion,
+iteration exhaustion and rejected content cannot mint another claim. Historical
+retry rows without preserved failure provenance fail closed. A rejected report can
+be corrected inside the same finite run, not through an additional synthesis run.
 Claim/release and model-request checks use persisted board state. The supervisor
 charges surviving processes even after their run closes; ordinary terminal grace
 cannot extend the diagnostic deadline. An uncertain boot/clock is conservatively
 exhausted rather than reset. Real CLI crash and timeout pilots prove no owner
 release, extra synthesis or recursive diagnostic incident.
 
+The task/run reservation exists before process launch. A child whose dispatcher
+dies before writing the PID can adopt that still-current reservation with its own
+process fingerprint before requesting the model. A late child whose reservation
+was released is refused. The interruption pilot uses a real source-CLI child and
+reopened board connection; it does not claim an OS-wide crash/reboot simulation.
+Diagnostic promotion honors the same admission guard, so a terminal synthesis hold
+cannot turn back into Ready through ordinary dependency recomputation.
+
+Writable imports retain diagnostic counters and receipts but park diagnostic work;
+their new board identity is not launch authority. Unknown workflow versions are
+refused at diagnostic admission, request and result/publication boundaries. Diagnostic
+tasks cannot be reclassified through legacy-history adjudication.
+
 Only a causal terminal cascade is merged. Independent same-run review causes
 remain separate. Up to 32 source IDs enter the bounded incident context; all source
 links remain in the board audit table. Expected waits contain reason, owner task,
-next action and source event. Unassigned ready work can generate a distinct
+next action and source event. Unassigned ready work or an unavailable assigned
+profile can generate a distinct
 stalled_queue candidate after the dispatcher's existing nonzero stale threshold;
-capacity skips are not execution failures.
+capacity skips are not execution failures. Comment/attachment activity neither
+restarts the stale clock nor creates another episode; a new lifecycle episode does.
 
 Inspect existing `show TASK --json`, `runs TASK --json`, comments and attachments.
 Incident state, report status, lesson status and publication status are separate.
@@ -112,7 +151,10 @@ Acknowledgment may have an empty clearance list. Recovery requires a later owner
 `completed` or explicit `unblocked` event. Wrong board/task/state or worker-context
 calls are refused. The receipt is retained; this operation never unblocks the owner.
 Later recurrence gets a new open incident linked to prior history. Acknowledgment
-suppresses a not-yet-published notice for that episode, not future recurrence.
+suppresses a notice not yet admitted by the subscription cursor transaction for
+that episode, including a report already published before acknowledgment. It does
+not suppress future recurrence. A network send already admitted before the
+acknowledgment cannot be recalled; failed-delivery replay rechecks acknowledgment.
 
 ## Publication, failures and notifications
 

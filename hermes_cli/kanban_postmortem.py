@@ -19,6 +19,8 @@ def initialize(conn):
         conn.execute('ALTER TABLE workflow_postmortems ADD COLUMN validator_profile TEXT')
     if 'deadline' not in columns:
         conn.execute('ALTER TABLE workflow_postmortems ADD COLUMN deadline REAL')
+    if 'failure_kind' not in columns:
+        conn.execute('ALTER TABLE workflow_postmortems ADD COLUMN failure_kind TEXT')
     conn.execute('''CREATE TABLE IF NOT EXISTS workflow_report_artifacts (
         incident_id TEXT PRIMARY KEY, attachment_id INTEGER NOT NULL, digest TEXT NOT NULL)''')
     conn.execute('''CREATE TABLE IF NOT EXISTS workflow_report_publication_failures (
@@ -26,6 +28,8 @@ def initialize(conn):
 
 
 def queue_reports(conn):
+    if not supported(conn):
+        return
     from hermes_cli.config import load_config
     from hermes_cli import kanban_db as kb
     try:
@@ -58,7 +62,8 @@ def queue_reports(conn):
         return
     with write_txn(conn):
         rows = conn.execute('''SELECT i.* FROM workflow_incidents i
-            WHERE report_status='queued' AND NOT EXISTS(
+            WHERE report_status='queued' AND i.board_id=(SELECT board_id FROM workflow_board)
+            AND NOT EXISTS(
               SELECT 1 FROM workflow_postmortems p WHERE p.incident_id=i.id)
             ORDER BY i.rowid LIMIT 16''').fetchall()
         for incident in rows:
@@ -77,6 +82,8 @@ def queue_reports(conn):
 
 
 def claim_allowed(conn, task_id):
+    if is_diagnostic(conn, task_id) and not supported(conn, task_id=task_id):
+        return False
     from hermes_cli.kanban_diagnostic_clock import settle
     row = settle(conn, task_id)
     if not row:
@@ -87,6 +94,7 @@ def claim_allowed(conn, task_id):
         return True
     status = conn.execute('SELECT report_status FROM workflow_incidents WHERE id=?', (row['incident_id'],)).fetchone()[0]
     return (row['runs_started'] < 2 and row['active_seconds'] < 600
+            and (row['runs_started'] == 0 or row['failure_kind'] == 'infrastructure')
             and row['started_monotonic'] is None and status == 'queued')
 
 
@@ -104,7 +112,7 @@ def claimed(conn, task_id, run_id):
     conn.execute('UPDATE task_runs SET max_runtime_seconds=? WHERE id=?', (cap,run_id))
 
 
-def released(conn, task_id, run_id, outcome):
+def released(conn, task_id, run_id, outcome, metadata=None):
     from hermes_cli.kanban_diagnostic_clock import settle
     row = conn.execute('SELECT * FROM workflow_postmortems WHERE task_id=? AND run_id=?', (task_id,run_id)).fetchone()
     if not row or row['started_monotonic'] is None:
@@ -112,7 +120,18 @@ def released(conn, task_id, run_id, outcome):
     row = settle(conn, task_id)
     total = row['active_seconds']
     if outcome != 'completed':
-        failed = row['runs_started'] >= 2 or total >= 600
+        metadata = metadata if isinstance(metadata, dict) else {}
+        elapsed, limit = metadata.get('elapsed_seconds'), metadata.get('limit_seconds')
+        supervisor_timeout = (outcome == 'timed_out'
+            and all(type(v) in (int, float) and math.isfinite(v) and v > 0 for v in (elapsed, limit))
+            and elapsed >= limit)
+        infrastructure = outcome in {'spawn_failed', 'rate_limited'} or supervisor_timeout or (
+            outcome == 'crashed' and metadata.get('exit_kind') == 'signaled'
+            and type(metadata.get('exit_code')) is int)
+        kind = ('content_rejected' if row['failure_kind'] == 'content_rejected' else
+                'infrastructure' if infrastructure else 'unverified_failure')
+        conn.execute('UPDATE workflow_postmortems SET failure_kind=? WHERE task_id=?', (kind, task_id))
+        failed = kind != 'infrastructure' or row['runs_started'] >= 2 or total >= 600
         conn.execute('UPDATE workflow_incidents SET report_status=? WHERE id=?', ('synthesis_failed' if failed else 'queued',row['incident_id']))
         if failed:
             conn.execute("UPDATE tasks SET status='blocked',block_kind='needs_input' WHERE id=?", (task_id,))
@@ -124,10 +143,24 @@ def is_diagnostic(conn, task_id):
             or is_validator(conn,task_id))
 
 
+def supported(conn, *, task_id=None):
+    board = conn.execute('SELECT board_id,schema_version FROM workflow_board WHERE singleton=1').fetchone()
+    if not board or board['schema_version'] != 1:
+        return False
+    if task_id is None:
+        return True
+    incident = conn.execute('''SELECT i.board_id FROM workflow_incidents i WHERE i.id IN (
+        SELECT incident_id FROM workflow_postmortems WHERE task_id=? UNION
+        SELECT incident_id FROM workflow_lessons WHERE validator_task=?)''', (task_id, task_id)).fetchone()
+    return incident is not None and incident['board_id'] == board['board_id']
+
+
 def receive(conn, task_id, run_id, report):
     job=conn.execute('SELECT * FROM workflow_postmortems WHERE task_id=?',(task_id,)).fetchone()
     if not job:
         return None
+    if not supported(conn, task_id=task_id):
+        return False
     from hermes_cli.kanban_diagnostic_clock import settle
     job = settle(conn, task_id)
     if job['active_seconds'] >= 600 or job['deadline'] is None or time.time() >= job['deadline']:
@@ -143,6 +176,7 @@ def receive(conn, task_id, run_id, report):
         return False
     from hermes_cli.kanban_diagnostic_report import valid
     if not valid(conn, incident, report):
+        conn.execute("UPDATE workflow_postmortems SET failure_kind='content_rejected' WHERE task_id=?", (task_id,))
         return False
     change=report['proposed_change']
     from hermes_cli.kanban_workflow_lessons import propose
@@ -160,8 +194,11 @@ def receive(conn, task_id, run_id, report):
 def publish_reports(conn):
     """Transactional outbox; a restart recovers a stored blob before making another."""
     from hermes_cli import kanban_db as kb
+    if not supported(conn):
+        return
     with write_txn(conn):
         rows=conn.execute('''SELECT * FROM workflow_incidents i WHERE report_status='complete'
+            AND i.board_id=(SELECT board_id FROM workflow_board)
             AND classification IN ('failure','stalled_queue') AND NOT EXISTS(
             SELECT 1 FROM workflow_report_artifacts a WHERE a.incident_id=i.id) LIMIT 16''').fetchall()
         for incident in rows:
