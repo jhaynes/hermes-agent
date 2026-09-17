@@ -214,6 +214,12 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
                     time.sleep(0.1)
                 assert kb.get_task(conn, task).status == 'done', (errors, (kb.worker_logs_dir() / f'{task}.log').read_text()[-6000:])
                 dispatch.reap_terminal_workers(conn)
+                from hermes_cli.kanban_review_guards import has_live_worker
+                until = time.monotonic() + 8
+                while has_live_worker(conn, attempt['id']) and time.monotonic() < until:
+                    time.sleep(0.1)
+                    dispatch.reap_terminal_workers(conn)
+                assert not has_live_worker(conn, attempt['id']), 'Do not treat a released claim as physical quiescence'
             current = state.get_attempt(conn, owner)
             assert current['completed_rounds'] == ordinal
             if ordinal == 3:

@@ -34,6 +34,21 @@ def identity_valid(conn, attempt):
             and hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == attempt['policy_digest'])
 
 
+def has_live_worker(conn, attempt_id):
+    from hermes_cli.kanban_db_dispatch import _worker_alive
+    from hermes_cli.kanban_db import _host_prefix
+    rows = conn.execute('''SELECT r.worker_pid,r.worker_started_at,r.claim_lock
+        FROM task_runs r JOIN review_actions a ON a.run_id=r.id
+        WHERE a.attempt_id=? AND r.worker_pid IS NOT NULL''', (attempt_id,)).fetchall()
+    for row in rows:
+        # Another host cannot prove local quiescence; require its owning reaper.
+        if not (row['claim_lock'] or '').startswith(_host_prefix()):
+            return True
+        if _worker_alive(row['worker_pid'], row['worker_started_at']):
+            return True
+    return False
+
+
 def snapshot_matches(conn, attempt):
     """Inspect the owner, not a reviewer-supplied SHA or a prior approval flag."""
     import subprocess

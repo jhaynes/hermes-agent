@@ -64,6 +64,50 @@ def test_managed_native_failure_redacts_before_durable_storage(tmp_path, monkeyp
         conn.close()
 
 
+def test_handoff_cannot_pause_or_start_cohort_while_worker_is_live(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    from hermes_cli import kanban_db_dispatch as dispatch
+    from hermes_cli import kanban_review_cohort as cohort
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    monkeypatch.setattr(dispatch, '_profile_exists_fn', lambda: lambda _: True)
+    conn = connect(tmp_path / 'board.db')
+    sleeper = tmp_path / 'worker.py'
+    sleeper.write_text('import time\ntime.sleep(60)\n')
+    processes = []
+    clock = [100.0]
+    monkeypatch.setattr(state.time, 'monotonic', lambda: clock[0])
+    def spawn(task, workspace):
+        process = subprocess.Popen([sys.executable, str(sleeper)])
+        processes.append(process)
+        return process.pid
+    try:
+        task = kb.create_task(conn, title='quiescent handoff', assignee='builder', workspace_kind='dir', workspace_path=str(tmp_path))
+        attempt = enroll(conn, task)
+        state.reserve_action(conn, task, category='preflight', expected_version=0)
+        assert len(dispatch.dispatch_once(conn, spawn_fn=spawn, max_spawn=1).spawned) == 1
+        run_id = kb.get_task(conn, task).current_run_id
+        assert kb.request_review(conn, task, expected_run_id=run_id)
+        lanes = {name: {'profile': 'reviewer', 'provider': 'anthropic', 'model': 'claude-sonnet-4-5',
+                        'workspace': str(tmp_path / name)} for name in attempt['roster']}
+        assert processes[0].poll() is None
+        clock[0] += 11
+        dispatch.enforce_max_runtime(conn)
+        assert state.get_attempt(conn, task)['active_seconds'] == pytest.approx(11), 'A released but live worker is not a clock pause'
+        with pytest.raises(ValueError, match='quiescent'):
+            cohort.start_cohort(conn, task, lanes=lanes, expected_version=1)
+        monkeypatch.setattr(dispatch, 'TERMINAL_WORKER_REAP_GRACE_SECONDS', 0)
+        dispatch.reap_terminal_workers(conn)
+        assert processes[0].wait(timeout=8) is not None
+        assert cohort.start_cohort(conn, task, lanes=lanes, expected_version=1)
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.terminate()
+            process.wait(timeout=8)
+        conn.close()
+
+
 @pytest.mark.parametrize('path', ['specify', 'decompose', 'delete', 'recreate', 'model'])
 def test_managed_identity_cannot_be_rewritten_by_legacy_paths(tmp_path, monkeypatch, path):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)

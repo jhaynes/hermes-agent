@@ -37,7 +37,8 @@ def start_cohort(conn, task_id, *, lanes, expected_version, recovery=False):
         paths = [str(Path(v['workspace']).resolve()) for v in lanes.values()]
         if len(set(paths)) != len(paths):
             raise ValueError('separate lane workspaces required')
-        if conn.execute("SELECT 1 FROM review_actions WHERE attempt_id=? AND state IN ('running','reserved')", (attempt['id'],)).fetchone():
+        from hermes_cli.kanban_review_guards import has_live_worker
+        if has_live_worker(conn, attempt['id']) or conn.execute("SELECT 1 FROM review_actions WHERE attempt_id=? AND state IN ('running','reserved')", (attempt['id'],)).fetchone():
             raise ValueError('quiescent boundary required')
         ordinal = attempt['completed_rounds'] + 1
         prior = conn.execute('SELECT * FROM review_rounds WHERE attempt_id=? AND ordinal=? ORDER BY recovery DESC LIMIT 1', (attempt['id'],ordinal)).fetchone()

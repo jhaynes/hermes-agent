@@ -115,7 +115,8 @@ def reserve_action(conn, task_id, *, category, expected_version, recovery=False)
         if category not in {'preflight', 'repair'} or category != attempt['state']:
             raise ValueError('action does not match attempt phase')
         live = conn.execute("SELECT 1 FROM review_actions WHERE attempt_id=? AND state IN ('reserved','running')", (attempt['id'],)).fetchone()
-        if live:
+        from hermes_cli.kanban_review_guards import has_live_worker
+        if live or has_live_worker(conn, attempt['id']):
             raise ValueError('action already reserved or running')
         previous = conn.execute('SELECT state FROM review_actions WHERE attempt_id=? AND ordinal=? AND category=? ORDER BY recovery DESC LIMIT 1',
                                 (attempt['id'], attempt['completed_rounds']+1, category)).fetchone()
@@ -203,6 +204,8 @@ def settle_clock(conn, attempt):
     mono, wall = time.monotonic(), time.time()
     clock = conn.execute('SELECT * FROM review_clock WHERE attempt_id=?', (attempt['id'],)).fetchone()
     running = conn.execute("SELECT 1 FROM review_actions WHERE attempt_id=? AND state='running' LIMIT 1", (attempt['id'],)).fetchone()
+    from hermes_cli.kanban_review_guards import has_live_worker
+    running = running or has_live_worker(conn, attempt['id'])
     if clock and running:
         if boot != clock['boot_id'] or mono < clock['monotonic_at']:
             hold(conn, attempt, 'clock_reconciliation_required')
@@ -222,7 +225,8 @@ def supervision_deadlines(conn):
     deadlines = {}
     with write_txn(conn):
         owners = conn.execute("""SELECT task_id FROM review_attempts WHERE id IN
-            (SELECT attempt_id FROM review_actions WHERE state='running')""").fetchall()
+            (SELECT a.attempt_id FROM review_actions a LEFT JOIN task_runs r ON r.id=a.run_id
+             WHERE a.state='running' OR r.worker_pid IS NOT NULL)""").fetchall()
         for owner in owners:
             attempt = get_attempt(conn, owner[0])
             settle_clock(conn, attempt)

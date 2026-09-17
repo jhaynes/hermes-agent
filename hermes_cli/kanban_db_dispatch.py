@@ -1932,6 +1932,8 @@ def _run_reclaim_phase(
     board: Optional[str] = None,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
+    from hermes_cli.kanban_review_state import supervision_deadlines
+    supervision_deadlines(conn)
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
