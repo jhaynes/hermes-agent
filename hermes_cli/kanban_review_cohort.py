@@ -28,6 +28,8 @@ def start_cohort(conn, task_id, *, lanes, expected_version, recovery=False):
         attempt = state.get_attempt(conn, task_id)
         if not attempt or attempt['version'] != expected_version:
             raise ValueError('attempt CAS lost')
+        if task_id!=attempt['task_id']:
+            raise ValueError('only the implementation owner can reserve a cohort')
         if attempt['state'] in {'approved', 'held', 'cancelled'}:
             return None
         if set(lanes) != set(attempt['roster']):

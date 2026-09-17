@@ -51,6 +51,10 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
     if consumed == 0:
         assert final['completed_rounds'] == 1
         assert final['state'] == 'repair'
+        with pytest.raises(ValueError,match='owner'):
+            state.reserve_action(conn,card['task_id'],category='repair',expected_version=final['version'])
+        with pytest.raises(ValueError,match='owner'):
+            cohort.start_cohort(conn,card['task_id'],lanes=lanes,expected_version=final['version'])
         state.reserve_action(conn, owner, category='repair', expected_version=final['version'])
         repair = kb.claim_task(conn, owner)
         assert repair is not None, 'Valid rejection must hand one repair back to the original builder'
