@@ -14,7 +14,7 @@ from hermes_cli.kanban_db_connect import write_txn
 TRIGGERS = frozenset({
     "blocked", "dependency_wait", "block_loop_detected", "crashed",
     "timed_out", "spawn_failed", "gave_up", "review_invalid",
-    "review_exhausted", "recovery_exhausted", "active_time_exhausted",
+    "review_exhausted", "recovery_exhausted", "active_time_exhausted", "queue_stalled",
 })
 
 
@@ -37,7 +37,13 @@ def initialize(conn):
             report_status TEXT NOT NULL, lesson_status TEXT NOT NULL DEFAULT 'proposed',
             source_events TEXT NOT NULL, report TEXT, created_at INTEGER NOT NULL)""")
         from hermes_cli.kanban_postmortem import initialize as initialize_postmortems
+        conn.execute('''CREATE TABLE IF NOT EXISTS workflow_incident_events (
+            event_id INTEGER PRIMARY KEY, incident_id TEXT NOT NULL)''')
+        conn.execute('''INSERT OR IGNORE INTO workflow_incident_events
+            SELECT CAST(j.value AS INTEGER), i.id FROM workflow_incidents i, json_each(i.source_events) j''')
         initialize_postmortems(conn)
+        from hermes_cli.kanban_incident_operator import initialize as initialize_dispositions
+        initialize_dispositions(conn)
         from hermes_cli.kanban_workflow_lessons import initialize as initialize_lessons
         initialize_lessons(conn)
 
@@ -64,6 +70,8 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
     from hermes_cli.kanban_postmortem import is_diagnostic
     if is_diagnostic(conn, task_id):
         return
+    if conn.execute('SELECT 1 FROM workflow_incident_events WHERE event_id=?', (event_id,)).fetchone():
+        return
     if kind=='gave_up' and run_id is None:
         cause=conn.execute("""SELECT kind,run_id FROM task_events WHERE task_id=? AND id<?
             AND kind IN ('claimed','crashed','timed_out','spawn_failed') ORDER BY id DESC LIMIT 1""",
@@ -74,19 +82,34 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
     typed = (payload or {}).get('kind')
     expected = kind == 'dependency_wait' or (kind == 'blocked' and typed in {'dependency', 'needs_input'})
     classification = 'expected_wait' if expected else 'failure'
-    # A terminal run's crash/gave_up/block cascade is one causal episode.
-    # Runless transitions are independent unless replaying that exact event.
-    episode = f"{board}:{task_id}:" + (f"run:{run_id}" if run_id is not None else f"event:{event_id}")
+    if kind == 'queue_stalled':
+        classification = 'stalled_queue'
+    # Equal run/classification does not prove two failures share a cause.
+    cause = None
+    if kind in {'gave_up', 'blocked', 'crashed', 'timed_out', 'spawn_failed'}:
+        cause = conn.execute('''SELECT e.kind, i.* FROM task_events e
+            JOIN workflow_incident_events s ON s.event_id=e.id
+            JOIN workflow_incidents i ON i.id=s.incident_id
+            WHERE e.task_id=? AND e.id<? AND i.run_id IS ?
+            ORDER BY e.id DESC LIMIT 1''', (task_id, event_id, run_id)).fetchone()
+        if (cause and cause['classification'] == 'failure'
+                and cause['kind'] in {'crashed', 'timed_out', 'spawn_failed', 'gave_up'}
+                and (kind in {'gave_up', 'blocked'} or (run_id is not None and cause['kind'] == kind))):
+            classification, expected = 'failure', False
+        else:
+            cause = None
+    episode = f"{board}:{task_id}:event:{event_id}"
     classified_episode = f'{episode}:{classification}'
-    prior = conn.execute("SELECT * FROM workflow_incidents WHERE episode_key IN (?,?) AND classification=?",
-                         (episode, classified_episode, classification)).fetchone()
+    prior = cause
     if prior:
+        conn.execute('INSERT INTO workflow_incident_events VALUES(?,?)', (event_id, prior['id']))
         events = json.loads(prior['source_events'])
-        if event_id not in events:
+        if event_id not in events and len(events) < 32:
             events.append(event_id)
             conn.execute("UPDATE workflow_incidents SET source_events=? WHERE id=?", (json.dumps(events), prior['id']))
         return
-    fingerprint = f"{task_id}:{classification}:{kind}"
+    family = 'blocked' if kind == 'block_loop_detected' else kind
+    fingerprint = f"{task_id}:{classification}:{family}"
     previous = conn.execute(
         "SELECT id FROM workflow_incidents WHERE fingerprint=? ORDER BY rowid DESC LIMIT 1", (fingerprint,),
     ).fetchone()
@@ -94,13 +117,35 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
     report = json.dumps({
         'schema': 1, 'reason': typed if typed in {'dependency', 'needs_input'} else 'dependency',
         'source_event': event_id, 'next_action': 'await_owner',
+        'owner': task_id,
     }) if expected else None
+    incident_id = str(uuid.uuid4())
     conn.execute(
         """INSERT INTO workflow_incidents
         (id,board_id,task_id,run_id,episode_key,fingerprint,prior_incident_id,
          classification,report_status,source_events,report,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (str(uuid.uuid4()), board, task_id, run_id, classified_episode, fingerprint,
+        (incident_id, board, task_id, run_id, classified_episode, fingerprint,
          previous[0] if previous else None, classification,
          'complete' if expected else 'queued', json.dumps([event_id]), report, created_at),
     )
+    conn.execute('INSERT INTO workflow_incident_events VALUES(?,?)', (event_id, incident_id))
+
+
+def diagnose_unowned_queue(conn, stale_timeout_seconds):
+    """Reuse the dispatcher's stale threshold; no ownership or capacity changes."""
+    if stale_timeout_seconds <= 0:
+        return
+    import time
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_postmortem import is_diagnostic
+    with write_txn(conn):
+        rows = conn.execute('''SELECT t.id, MAX(e.created_at) AS last_at FROM tasks t
+            JOIN task_events e ON e.task_id=t.id
+            WHERE t.status='ready' AND t.assignee IS NULL AND t.current_run_id IS NULL
+            GROUP BY t.id HAVING last_at < ? ORDER BY last_at LIMIT 16''',
+            (time.time() - stale_timeout_seconds,)).fetchall()
+        for row in rows:
+            last = conn.execute('SELECT kind FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT 1', (row['id'],)).fetchone()
+            if last['kind'] != 'queue_stalled' and not is_diagnostic(conn, row['id']):
+                kb._append_event(conn, row['id'], 'queue_stalled', {'next_action': 'assign_owner'})

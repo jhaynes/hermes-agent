@@ -54,9 +54,11 @@ def test_two_profile_scopes_keep_incidents_counters_and_lessons_separate(tmp_pat
                 assert reporter.assignee==f'diagnostic_{name}'
                 assert incident['board_id']==board
                 if name=='a':
-                    report={'incident_id':incident['id'],'citations':[event],'facts':['Timeout comparison'],
+                    fact = dict(conn.execute('SELECT id,kind,created_at FROM task_events WHERE id=?', (event,)).fetchone())
+                    report={'incident_id':incident['id'],'citations':[event],'facts':[fact],
                         'hypotheses':[],'confidence':'high','contributing_conditions':[],'missed_gates':[],
-                        'recovery_recommendation':'Operator decision','validation_needed':['Independent replay'],'owner':task,
+                        'confidence_basis':'cited_event_observation_only',
+                        'recovery_recommendation':'operator_decision_required','validation_needed':['deterministic_replay'],'owner':task,
                         'proposed_change':{'kind':'procedural_evidence','approval_required':False,'record':{
                             'procedure_id':'record-worker-deadline','failure_shape':'worker-timeout','source_event':event,
                             'required_evidence':['elapsed_seconds','limit_seconds'],'invocation':'hermes kanban runs <task-id> --json'}}}

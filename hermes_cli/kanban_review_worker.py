@@ -26,6 +26,9 @@ def restricted_worker():
 
 def construction_tools(tools):
     # Initial snapshot only. This is not a filesystem/network sandbox.
+    from hermes_cli.kanban_diagnostic_worker import current_task, TOOLS
+    if current_task():
+        return [tool for tool in tools if tool['function']['name'] in TOOLS]
     if not restricted_worker():
         return tools
     return [tool for tool in tools if tool['function']['name'] not in
@@ -41,6 +44,9 @@ def before_model_request(agent, request):
     from hermes_cli import kanban_review_state as state
     from hermes_cli.kanban_review_cohort import record_runtime_route
     with connect_closing(Path(db_path)) as conn:
+        from hermes_cli.kanban_diagnostic_worker import before_request
+        if before_request(conn, task_id, agent):
+            return
         member = conn.execute('SELECT * FROM review_members WHERE task_id=?', (task_id,)).fetchone()
         attempt = state.get_attempt(conn, task_id)
         if attempt is None:

@@ -19,6 +19,8 @@ def local_only(event, args):
     if event == "socket.connect" and isinstance(args[1], tuple):
         host = args[1][0]
         if not ipaddress.ip_address(host).is_loopback:
+            import traceback
+            traceback.print_stack()
             raise SystemExit(f"Synthetic worker attempted non-local connection: {host}")
 
 

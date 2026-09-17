@@ -21,6 +21,12 @@ def _object_file(path):
 def enroll(args):
     from hermes_cli.kanban_review_state import enroll_review
     receipt=_object_file(args.receipt)
+    if receipt.get('operation') == 'incident':
+        from hermes_cli.kanban_incident_operator import decide
+        with connect_closing() as conn:
+            result = decide(conn, args.task_id, receipt)
+        print(json.dumps(result, sort_keys=True))
+        return 0
     if receipt == {'operation':'readiness'}:
         from hermes_cli.kanban_review_readiness import begin, issue
         with connect_closing() as conn:

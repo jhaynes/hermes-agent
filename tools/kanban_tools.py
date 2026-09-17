@@ -124,11 +124,24 @@ def _kanban_handler(tool_name: str) -> Callable:
     def deco(fn):
         @functools.wraps(fn)
         def wrapper(args: dict, **kw) -> str:
+            diagnostic = False
             try:
+                from hermes_cli.kanban_diagnostic_worker import current_task, TOOLS
+                diagnostic = current_task()
+                if diagnostic:
+                    _check(tool_name in TOOLS and args.get('task_id', diagnostic) == diagnostic,
+                           'Diagnostics may only inspect evidence or return their own result')
+                    _check(not args.get('board'), 'Diagnostics cannot override the pinned board')
+                    metadata = args.get('metadata')
+                    _check(not args.get('artifacts') and not args.get('created_cards')
+                           and (not isinstance(metadata, dict) or set(metadata) <= {'postmortem', 'lesson_validation'}),
+                           'Diagnostics cannot publish files or arbitrary metadata')
                 return fn(args, **kw)
             except _Reject as e:
                 return e.args[0]
             except Exception as e:
+                if diagnostic:
+                    return tool_error('diagnostic_result_unavailable')
                 if not isinstance(e, ValueError):
                     logger.exception(f"{tool_name} failed")
                 return tool_error(f"{tool_name}: {e}")
@@ -486,6 +499,9 @@ def inject_new_comments_from_env(agent: Any) -> bool:
     seen = _comment_watermark.get(tid)
     try:
         with _board(None, quiet_close=True) as (kb, conn):
+            from hermes_cli.kanban_postmortem import is_diagnostic
+            if is_diagnostic(conn, tid):
+                return False
             rows = kb.list_comments_after(conn, tid, after_id=seen or 0)
     except Exception:
         logger.debug("comment-inject: bridge failed", exc_info=True)
@@ -517,6 +533,12 @@ def inject_new_comments_from_env(agent: Any) -> bool:
 def _handle_show(args: dict, **kw) -> str:
     """Full task state: row, parents, children, comments, runs, last 50 events."""
     tid = _require_task_id(args)
+    from hermes_cli.kanban_diagnostic_worker import current_task, context
+    diagnostic = current_task()
+    if diagnostic:
+        _check(tid == diagnostic, 'Diagnostics may read only their bounded evidence context')
+        with _board(args.get("board")) as (_, conn):
+            return json.dumps(context(conn, tid))
     with _board(args.get("board")) as (kb, conn):
         task = _existing_task(kb, conn, tid)
         return json.dumps({

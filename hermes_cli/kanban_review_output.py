@@ -19,7 +19,15 @@ def workflow_details(conn, task_id):
             'SELECT receipt FROM review_decisions WHERE attempt_id=? ORDER BY version', (attempt['id'],))]
         attempt['lineage'] = [dict(r) for r in conn.execute(
             'SELECT * FROM review_successors WHERE predecessor_id=? OR successor_id=?', (attempt['id'],attempt['id']))]
-    rows=[dict(r) for r in conn.execute('SELECT id,state,report_status,lesson_status,classification FROM workflow_incidents WHERE task_id=? ORDER BY rowid DESC LIMIT 21',(owner,))]
+    rows=[dict(r) for r in conn.execute('''SELECT i.id,i.state,i.report_status,i.lesson_status,i.classification,
+        p.task_id AS diagnostic_task,p.runs_started,p.active_seconds,p.deadline,
+        a.attachment_id,a.digest,f.error_kind AS publication_error,
+        CASE WHEN a.attachment_id IS NOT NULL THEN 'complete' WHEN f.error_kind IS NOT NULL
+             THEN 'failed' ELSE 'pending' END AS publication_status
+        FROM workflow_incidents i LEFT JOIN workflow_postmortems p ON p.incident_id=i.id
+        LEFT JOIN workflow_report_artifacts a ON a.incident_id=i.id
+        LEFT JOIN workflow_report_publication_failures f ON f.incident_id=i.id
+        WHERE i.task_id=? ORDER BY i.rowid DESC LIMIT 21''',(owner,))]
     return {'attempt':attempt,'lanes':lanes,'actions':actions,'incidents':rows[:20],'incidents_has_more':len(rows)>20}
 
 
@@ -34,6 +42,12 @@ def brief(conn, task_id):
 
 def annotate_runs(conn, task_id, runs):
     """Keep the existing JSON list shape, attaching only this run's reservation."""
+    diagnostic = conn.execute('''SELECT p.incident_id,p.runs_started,p.active_seconds,p.deadline,
+        i.report_status,i.state FROM workflow_postmortems p JOIN workflow_incidents i ON i.id=p.incident_id
+        WHERE p.task_id=?''', (task_id,)).fetchone()
+    if diagnostic:
+        for run in runs:
+            run['diagnostic'] = dict(diagnostic)
     details = workflow_details(conn, task_id)
     attempt = details['attempt']
     if attempt is None:

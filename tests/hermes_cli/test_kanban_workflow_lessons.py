@@ -9,7 +9,7 @@ from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli.kanban_db_connect import connect, write_txn
 
 
-@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent'])
+@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent','validator_failure'])
 def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_path, monkeypatch, attack):
     home=tmp_path/'.hermes'
     home.mkdir()
@@ -34,9 +34,11 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
     spawned=[]
     dispatch.dispatch_once(conn,spawn_fn=lambda t,w:spawned.append(t),max_spawn=1)
     reporter=spawned[0]
-    report={'incident_id':incident['id'],'citations':[event], 'facts':['Worker exceeded its deadline.'],
+    fact = dict(conn.execute('SELECT id,kind,created_at FROM task_events WHERE id=?', (event,)).fetchone())
+    report={'incident_id':incident['id'],'citations':[event], 'facts':[fact],
             'hypotheses':[], 'confidence':'high','contributing_conditions':[], 'missed_gates':[],
-            'recovery_recommendation':'Operator decision.', 'validation_needed':['Replay timing comparison'], 'owner':owner,
+            'confidence_basis':'cited_event_observation_only',
+            'recovery_recommendation':'operator_decision_required', 'validation_needed':['deterministic_replay'], 'owner':owner,
             'proposed_change':{'kind':'procedural_evidence','record':{
                 'procedure_id':'record-worker-deadline','failure_shape':'worker-timeout',
                 'source_event':event,'required_evidence':['elapsed_seconds','limit_seconds'],
@@ -56,6 +58,14 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
     validator=spawned[-1]
     assert validator.assignee=='validator'
     assert validator.id!=reporter.id
+    if attack == 'validator_failure':
+        dispatch._record_task_failure(conn, validator.id, 'synthetic failure', outcome='crashed',
+                                     release_claim=True, end_run=True, force_trip=True)
+        assert kb.unblock_task(conn, validator.id)
+        assert kb.claim_task(conn, validator.id) is None, 'Manual/native retry must not multiply validator reservations'
+        assert conn.execute('SELECT status FROM workflow_lessons').fetchone()[0] == 'pending_approval'
+        conn.close()
+        return
     assert kb.complete_task(conn,validator.id,expected_run_id=validator.current_run_id,
                             metadata={'lesson_validation':{'source_event':event,'result':'reproduced'}})
     lesson=dict(conn.execute('SELECT * FROM workflow_lessons').fetchone())

@@ -3165,7 +3165,7 @@ def redact_review_value(value: Any) -> Any:
 
         return redact_sensitive_text(value, force=True)
     if isinstance(value, dict):
-        return {key: redact_review_value(item) for key, item in value.items()}
+        return {redact_review_value(key): redact_review_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [redact_review_value(item) for item in value]
     if isinstance(value, tuple):
@@ -3802,6 +3802,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     attachments, prior attempts, done-parent handoffs, the assignee's recent
     work, comments. Lists are tail-capped and fields char-capped
     (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards."""
+    from hermes_cli.kanban_diagnostic_worker import context as diagnostic_context
+    diagnostic = diagnostic_context(conn, task_id)
+    if diagnostic is not None:
+        return json.dumps(diagnostic, sort_keys=True)
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")

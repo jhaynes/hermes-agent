@@ -31,9 +31,11 @@ def admissible(proposal):
 
 
 def propose(conn, incident, author_task, proposal):
-    from hermes_cli.config import load_config
     from hermes_cli import kanban_db as kb
-    profile=load_config().get('kanban',{}).get('review_feedback',{}).get('validator_profile')
+    # The reporter runs in its own home, not the dispatcher policy's home.
+    # Routing is reserved at queue time, never inherited from author prose.
+    job = conn.execute('SELECT validator_profile FROM workflow_postmortems WHERE task_id=?', (author_task,)).fetchone()
+    profile = job['validator_profile'] if job else None
     if not admissible(proposal) or not profile:
         conn.execute("UPDATE workflow_incidents SET lesson_status='pending_approval' WHERE id=?",(incident['id'],))
         return
@@ -46,10 +48,22 @@ def propose(conn, incident, author_task, proposal):
                           (incident['id'],record['source_event'],encoded)).fetchone()
     if existing:
         return
-    validator=kb.create_task(conn,title='Validate procedural evidence',body=encoded,assignee=profile,
-                             max_runtime_seconds=600,max_retries=1,goal_mode=False)
     conn.execute('INSERT INTO workflow_lessons(id,incident_id,source_event,author_task,validator_task,status,record) VALUES(?,?,?,?,?,?,?)',
-                 (str(uuid.uuid4()),incident['id'],record['source_event'],author_task,validator,'proposed',encoded))
+                 (str(uuid.uuid4()),incident['id'],record['source_event'],author_task,None,'proposed',encoded))
+
+
+def queue_validators(conn):
+    """Only the dispatcher creates validators; a reporter merely reserves data."""
+    from hermes_cli import kanban_db as kb
+    with kb.write_txn(conn):
+        rows = conn.execute('''SELECT l.*, p.validator_profile FROM workflow_lessons l
+            JOIN workflow_postmortems p ON p.task_id=l.author_task
+            WHERE l.status='proposed' AND l.validator_task IS NULL LIMIT 16''').fetchall()
+        for row in rows:
+            task = kb.create_task(conn, title='Validate procedural evidence', body=row['record'],
+                                  assignee=row['validator_profile'], max_runtime_seconds=600,
+                                  max_retries=1, goal_mode=False)
+            conn.execute('UPDATE workflow_lessons SET validator_task=? WHERE id=?', (task, row['id']))
 
 
 def is_validator(conn, task_id):

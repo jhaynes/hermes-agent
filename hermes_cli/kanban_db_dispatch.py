@@ -456,10 +456,11 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
         "SELECT r.id, r.task_id, r.worker_pid, r.worker_started_at, r.claim_lock FROM task_runs r "
         "LEFT JOIN review_actions a ON a.run_id=r.id "
         "LEFT JOIN review_attempts w ON w.id=a.attempt_id "
+        "LEFT JOIN workflow_postmortems p ON p.run_id=r.id "
         "WHERE r.ended_at IS NOT NULL AND (r.ended_at <= ? "
-        "OR a.deadline <= ? OR w.state IN ('held','cancelled')) "
+        "OR a.deadline <= ? OR p.deadline <= ? OR w.state IN ('held','cancelled')) "
         "AND r.worker_pid IS NOT NULL AND r.worker_started_at IS NOT NULL",
-        (int(now) - TERMINAL_WORKER_REAP_GRACE_SECONDS, now),
+        (int(now) - TERMINAL_WORKER_REAP_GRACE_SECONDS, now, now),
     ).fetchall()
     host_prefix = _kb._host_prefix()
     reaped: list[str] = []
@@ -609,7 +610,8 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
         "WHERE (t.status = 'running' OR EXISTS(SELECT 1 FROM review_actions a "
-        "WHERE a.task_id=t.id AND a.run_id=t.current_run_id AND a.state='running')) "
+        "WHERE a.task_id=t.id AND a.run_id=t.current_run_id AND a.state='running') "
+        "OR EXISTS(SELECT 1 FROM workflow_postmortems p WHERE p.task_id=t.id AND p.run_id=t.current_run_id)) "
         "  AND t.max_runtime_seconds IS NOT NULL "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
         "  AND t.worker_pid IS NOT NULL"
@@ -2076,8 +2078,9 @@ def _dispatch_once_locked(
     :func:`_tick_spawn_budget`."""
     result = DispatchResult()
     if not dry_run:
-        from hermes_cli.kanban_workflow_incidents import reconcile_events
+        from hermes_cli.kanban_workflow_incidents import reconcile_events, diagnose_unowned_queue
         reconcile_events(conn)
+        diagnose_unowned_queue(conn, stale_timeout_seconds)
         from hermes_cli.kanban_postmortem import queue_reports
         queue_reports(conn)
     _run_reclaim_phase(

@@ -14,14 +14,34 @@ def initialize(conn):
         incident_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,
         runs_started INTEGER NOT NULL DEFAULT 0, active_seconds REAL NOT NULL DEFAULT 0,
         started_monotonic REAL, boot_id TEXT, run_id INTEGER)''')
+    columns = {r[1] for r in conn.execute('PRAGMA table_info(workflow_postmortems)')}
+    if 'validator_profile' not in columns:
+        conn.execute('ALTER TABLE workflow_postmortems ADD COLUMN validator_profile TEXT')
+    if 'deadline' not in columns:
+        conn.execute('ALTER TABLE workflow_postmortems ADD COLUMN deadline REAL')
     conn.execute('''CREATE TABLE IF NOT EXISTS workflow_report_artifacts (
         incident_id TEXT PRIMARY KEY, attachment_id INTEGER NOT NULL, digest TEXT NOT NULL)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS workflow_report_publication_failures (
+        incident_id TEXT PRIMARY KEY, error_kind TEXT NOT NULL, attempts INTEGER NOT NULL)''')
 
 
 def queue_reports(conn):
     from hermes_cli.config import load_config
     from hermes_cli import kanban_db as kb
-    publish_reports(conn)
+    try:
+        publish_reports(conn)
+    except (OSError, ValueError) as exc:
+        # Outbox I/O cannot prevent supervising running workers. Keep a typed
+        # publication failure, never an exception string containing a path/secret.
+        with write_txn(conn):
+            conn.execute('''INSERT INTO workflow_report_publication_failures
+                SELECT i.id, ?, 1 FROM workflow_incidents i WHERE i.report_status='complete'
+                AND i.classification!='expected_wait' AND NOT EXISTS (
+                    SELECT 1 FROM workflow_report_artifacts a WHERE a.incident_id=i.id)
+                ON CONFLICT(incident_id) DO UPDATE SET attempts=attempts+1,error_kind=excluded.error_kind''',
+                ('io_failure' if isinstance(exc, OSError) else 'artifact_mismatch',))
+    from hermes_cli.kanban_workflow_lessons import queue_validators
+    queue_validators(conn)
     from hermes_cli.kanban_lesson_apply import apply_next
     try:
         apply_next(conn)
@@ -50,16 +70,24 @@ def queue_reports(conn):
             task_id = kb.create_task(conn, title='Bounded workflow postmortem', body=body,
                                      assignee=profile, max_runtime_seconds=600,
                                      max_retries=2, goal_mode=False)
-            conn.execute('INSERT INTO workflow_postmortems(incident_id,task_id) VALUES(?,?)', (incident['id'],task_id))
+            conn.execute('INSERT INTO workflow_postmortems(incident_id,task_id,validator_profile) VALUES(?,?,?)',
+                         (incident['id'], task_id, config.get('validator_profile')))
             kb._insert_comment(conn, incident['task_id'], 'workflow',
                                f"Incident {incident['id']}: diagnostic {task_id}; implementation remains held.", int(time.time()))
 
 
 def claim_allowed(conn, task_id):
-    row = conn.execute('SELECT * FROM workflow_postmortems WHERE task_id=?', (task_id,)).fetchone()
+    from hermes_cli.kanban_diagnostic_clock import settle
+    row = settle(conn, task_id)
     if not row:
+        lesson = conn.execute('SELECT status FROM workflow_lessons WHERE validator_task=?', (task_id,)).fetchone()
+        if lesson:
+            return lesson['status'] == 'proposed' and not conn.execute(
+                'SELECT 1 FROM task_runs WHERE task_id=? LIMIT 1', (task_id,)).fetchone()
         return True
-    return row['runs_started'] < 2 and row['active_seconds'] < 600
+    status = conn.execute('SELECT report_status FROM workflow_incidents WHERE id=?', (row['incident_id'],)).fetchone()[0]
+    return (row['runs_started'] < 2 and row['active_seconds'] < 600
+            and row['started_monotonic'] is None and status == 'queued')
 
 
 def claimed(conn, task_id, run_id):
@@ -69,23 +97,20 @@ def claimed(conn, task_id, run_id):
         return
     cap = max(1, math.floor(600-row['active_seconds']))
     conn.execute('''UPDATE workflow_postmortems SET runs_started=runs_started+1,
-        started_monotonic=?,boot_id=?,run_id=? WHERE task_id=?''',
-        (time.monotonic(),str(psutil.boot_time()),run_id,task_id))
+        started_monotonic=?,boot_id=?,run_id=?,deadline=? WHERE task_id=?''',
+        (time.monotonic(),str(psutil.boot_time()),run_id,time.time()+cap,task_id))
     conn.execute("UPDATE workflow_incidents SET report_status='running' WHERE id=?", (row['incident_id'],))
     conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?', (cap,task_id))
     conn.execute('UPDATE task_runs SET max_runtime_seconds=? WHERE id=?', (cap,run_id))
 
 
 def released(conn, task_id, run_id, outcome):
-    import psutil
+    from hermes_cli.kanban_diagnostic_clock import settle
     row = conn.execute('SELECT * FROM workflow_postmortems WHERE task_id=? AND run_id=?', (task_id,run_id)).fetchone()
     if not row or row['started_monotonic'] is None:
         return
-    elapsed = time.monotonic()-row['started_monotonic']
-    if row['boot_id'] != str(psutil.boot_time()) or elapsed < 0:
-        elapsed = 600
-    total = row['active_seconds'] + elapsed
-    conn.execute('UPDATE workflow_postmortems SET active_seconds=?,started_monotonic=NULL WHERE task_id=?', (total,task_id))
+    row = settle(conn, task_id)
+    total = row['active_seconds']
     if outcome != 'completed':
         failed = row['runs_started'] >= 2 or total >= 600
         conn.execute('UPDATE workflow_incidents SET report_status=? WHERE id=?', ('synthesis_failed' if failed else 'queued',row['incident_id']))
@@ -103,34 +128,32 @@ def receive(conn, task_id, run_id, report):
     job=conn.execute('SELECT * FROM workflow_postmortems WHERE task_id=?',(task_id,)).fetchone()
     if not job:
         return None
+    from hermes_cli.kanban_diagnostic_clock import settle
+    job = settle(conn, task_id)
+    if job['active_seconds'] >= 600 or job['deadline'] is None or time.time() >= job['deadline']:
+        return False
     if run_id is None or job['run_id']!=run_id or not isinstance(report,dict):
         return False
+    current = conn.execute('''SELECT 1 FROM tasks t JOIN task_runs r ON r.id=t.current_run_id
+        WHERE t.id=? AND t.status='running' AND r.id=? AND r.ended_at IS NULL''', (task_id, run_id)).fetchone()
+    if not current:
+        return False
     incident=conn.execute('SELECT * FROM workflow_incidents WHERE id=?',(job['incident_id'],)).fetchone()
-    if incident['report_status']=='complete':
+    if incident['report_status'] != 'running':
         return False
-    fields={'incident_id','citations','facts','hypotheses','confidence','contributing_conditions',
-            'missed_gates','recovery_recommendation','proposed_change','validation_needed','owner'}
-    if set(report)!=fields or report['incident_id']!=incident['id'] or report['owner']!=incident['task_id']:
-        return False
-    citations=report['citations']
-    if not isinstance(citations,list) or not citations or not all(type(c) is int for c in citations):
-        return False
-    if not set(citations)<=set(json.loads(incident['source_events'])):
-        return False
-    if any(not isinstance(report[k],list) for k in ('facts','hypotheses','contributing_conditions','missed_gates','validation_needed')):
-        return False
-    if report['confidence'] not in {'unknown','low','medium','high'} or not report['validation_needed']:
+    from hermes_cli.kanban_diagnostic_report import valid
+    if not valid(conn, incident, report):
         return False
     change=report['proposed_change']
-    from hermes_cli.kanban_workflow_lessons import admissible, propose
-    if change is not None and not admissible(change) and (not isinstance(change,dict) or change.get('approval_required') is not True):
-        return False
+    from hermes_cli.kanban_workflow_lessons import propose
     encoded=json.dumps(report,sort_keys=True)
     if len(encoded.encode())>32768:
         return False
     conn.execute("UPDATE workflow_incidents SET report=?,report_status='complete' WHERE id=?", (encoded,incident['id']))
-    if change is not None:
+    if change is not None and report['facts']:
         propose(conn,incident,task_id,change)
+    elif change is not None:
+        conn.execute("UPDATE workflow_incidents SET lesson_status='pending_approval' WHERE id=?", (incident['id'],))
     return True
 
 
@@ -139,7 +162,7 @@ def publish_reports(conn):
     from hermes_cli import kanban_db as kb
     with write_txn(conn):
         rows=conn.execute('''SELECT * FROM workflow_incidents i WHERE report_status='complete'
-            AND classification='failure' AND NOT EXISTS(
+            AND classification IN ('failure','stalled_queue') AND NOT EXISTS(
             SELECT 1 FROM workflow_report_artifacts a WHERE a.incident_id=i.id) LIMIT 16''').fetchall()
         for incident in rows:
             data=incident['report'].encode()
@@ -147,7 +170,27 @@ def publish_reports(conn):
             filename=f'postmortem-{digest}.json'
             existing=conn.execute('SELECT id FROM task_attachments WHERE task_id=? AND filename=? AND uploaded_by=?',
                                   (incident['task_id'],filename,'workflow')).fetchone()
-            attachment=existing[0] if existing else kb.store_attachment_bytes(conn,incident['task_id'],filename,data,content_type='application/json',uploaded_by='workflow')
+            path = kb.task_attachments_dir(incident['task_id']) / filename
+            if existing:
+                attachment = existing[0]
+            elif path.exists() or path.is_symlink():
+                # A crash can commit the blob but roll back its metadata row.
+                # Adopt only the exact generated name and verified bytes.
+                if path.is_symlink() or path.stat().st_size != len(data) or path.read_bytes() != data:
+                    raise ValueError('postmortem artifact mismatch; operator inspection required')
+                attachment = kb.add_attachment(conn, incident['task_id'], filename=filename,
+                    stored_path=str(path.resolve()), content_type='application/json', size=len(data), uploaded_by='workflow')
+            else:
+                attachment = kb.store_attachment_bytes(conn,incident['task_id'],filename,data,content_type='application/json',uploaded_by='workflow')
+            stored = kb.get_attachment(conn, attachment)
+            from pathlib import Path
+            blob = Path(stored.stored_path)
+            if blob.is_symlink() or blob.stat().st_size != len(data) or blob.read_bytes() != data:
+                raise ValueError('postmortem artifact readback mismatch')
             conn.execute('INSERT INTO workflow_report_artifacts VALUES(?,?,?)',(incident['id'],attachment,digest))
+            conn.execute('DELETE FROM workflow_report_publication_failures WHERE incident_id=?', (incident['id'],))
             kb._insert_comment(conn,incident['task_id'],'workflow',
                                f"Postmortem {incident['id']} attached ({digest}); incident remains {incident['state']}.",int(time.time()))
+            if incident['state'] != 'acknowledged':
+                kb._append_event(conn, incident['task_id'], 'postmortem_report',
+                                 {'incident_id': incident['id'], 'attachment_id': attachment})

@@ -232,7 +232,8 @@ def settle_clock(conn, attempt):
 
 def supervision_deadlines(conn):
     """Settle each live union once; a hold revokes every outstanding worker."""
-    deadlines = {}
+    from hermes_cli.kanban_diagnostic_clock import deadlines as diagnostic_deadlines
+    deadlines = diagnostic_deadlines(conn)
     with write_txn(conn):
         owners = conn.execute("""SELECT task_id FROM review_attempts WHERE id IN
             (SELECT a.attempt_id FROM review_actions a LEFT JOIN task_runs r ON r.id=a.run_id
