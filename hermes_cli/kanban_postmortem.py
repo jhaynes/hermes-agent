@@ -73,7 +73,7 @@ def queue_reports(conn):
             conn.execute('INSERT INTO workflow_postmortems(incident_id,task_id,validator_profile) VALUES(?,?,?)',
                          (incident['id'], task_id, config.get('validator_profile')))
             kb._insert_comment(conn, incident['task_id'], 'workflow',
-                               f"Incident {incident['id']}: diagnostic {task_id}; implementation remains held.", int(time.time()))
+                               f"Incident {incident['id']}: diagnostic {task_id}; owner state is unchanged.", int(time.time()))
 
 
 def claim_allowed(conn, task_id):
@@ -165,6 +165,10 @@ def publish_reports(conn):
             AND classification IN ('failure','stalled_queue') AND NOT EXISTS(
             SELECT 1 FROM workflow_report_artifacts a WHERE a.incident_id=i.id) LIMIT 16''').fetchall()
         for incident in rows:
+            from hermes_cli.kanban_diagnostic_report import valid
+            if (not isinstance(incident['report'], str) or len(incident['report'].encode()) > 32768
+                    or not valid(conn, incident, json.loads(incident['report']))):
+                raise ValueError('unvalidated report cannot be published')
             data=incident['report'].encode()
             digest=hashlib.sha256(data).hexdigest()
             filename=f'postmortem-{digest}.json'

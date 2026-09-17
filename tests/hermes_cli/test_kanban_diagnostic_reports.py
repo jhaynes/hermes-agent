@@ -65,3 +65,19 @@ def test_untrusted_report_types_refuse_without_throwing(tmp_path, monkeypatch, f
         report = json.loads(kb.build_worker_context(conn, task))['result_contract']['postmortem']
         report[field] = value
         assert not kb.complete_task(conn, task, expected_run_id=run.current_run_id, metadata={'postmortem': report})
+
+
+def test_legacy_unvalidated_report_cannot_leak_through_publication(tmp_path, monkeypatch):
+    from hermes_cli.kanban_review_output import workflow_details
+    home = tmp_path / 'home'
+    home.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(home))
+    with connect(tmp_path / 'board.db') as conn:
+        owner = kb.create_task(conn, title='fixture', assignee=None)
+        kb.block_task(conn, owner, kind='capability', reason='failure')
+        with kb.write_txn(conn):
+            conn.execute("UPDATE workflow_incidents SET report_status='complete',report=?",
+                         (json.dumps({'api_key=synthetic-legacy-secret': 'malicious unvalidated report'}),))
+        reports.queue_reports(conn)
+        assert not kb.list_attachments(conn, owner)
+        assert workflow_details(conn, owner)['incidents'][0]['publication_status'] == 'failed'
