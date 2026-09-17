@@ -107,6 +107,7 @@ def _amend(conn, task_id, attempt, receipt):
 
 def _successor(conn, task_id, attempt, receipt):
     from hermes_cli import kanban_review_state as state
+    from hermes_cli.kanban_postmortem import is_diagnostic
     new = receipt['successor']
     if (attempt['state'] not in {'held','cancelled'} or not isinstance(new,dict)
             or set(new) != {'task_id','base_sha','target_sha','allowance'}):
@@ -119,6 +120,7 @@ def _successor(conn, task_id, attempt, receipt):
     target = conn.execute('SELECT status,current_run_id,worker_pid FROM tasks WHERE id=?', (new['task_id'],)).fetchone()
     if (not target or target['status'] not in {'ready','blocked','review'} or target['current_run_id'] is not None
             or target['worker_pid'] is not None or state.get_attempt(conn,new['task_id'])
+            or is_diagnostic(conn, new['task_id'])
             or conn.execute('SELECT 1 FROM review_successors WHERE predecessor_id=?',(attempt['id'],)).fetchone()):
         raise ValueError('successor target must be a distinct quiescent unenrolled task')
     policy = json.dumps({'version':1, **allowance},sort_keys=True,separators=(',',':'))

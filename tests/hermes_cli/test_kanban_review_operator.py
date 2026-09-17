@@ -60,7 +60,8 @@ def test_scoped_operator_decision_preserves_budgets(tmp_path, monkeypatch, opera
                     compatibility=attempt['compatibility'], decision='recreation is not authority')
 
 
-def test_exhausted_predecessor_needs_explicit_finite_successor(tmp_path, monkeypatch):
+@pytest.mark.parametrize('diagnostic', [False, True])
+def test_exhausted_predecessor_needs_explicit_finite_successor(tmp_path, monkeypatch, diagnostic):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     path = tmp_path / 'board.db'
     monkeypatch.setenv('HERMES_KANBAN_DB', str(path))
@@ -72,12 +73,24 @@ def test_exhausted_predecessor_needs_explicit_finite_successor(tmp_path, monkeyp
             roster=sorted(state.REQUIRED_LANES), consumed={'rounds':3,'recovery':2,'active_seconds':7200},
             compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='known exhausted history')
         successor = kb.create_task(conn, title='explicit next phase', assignee='builder')
+        if diagnostic:
+            from hermes_cli.config import save_config
+            from hermes_cli.kanban_postmortem import queue_reports
+            save_config({'kanban':{'review_feedback':{'postmortem_profile':'diagnostic'}}})
+            failed = kb.create_task(conn,title='unrelated incident',assignee=None)
+            assert kb.block_task(conn,failed,kind='capability',reason='synthetic')
+            queue_reports(conn)
+            successor = conn.execute('SELECT task_id FROM workflow_postmortems LIMIT 1').fetchone()[0]
         decision = {'operation':'successor', 'attempt_id':attempt['id'], 'expected_version':0,
                     'board_id':attempt['board_id'], 'spec_digest':attempt['spec_digest'],
                     'base_sha':attempt['base_sha'], 'target_sha':attempt['target_sha'],
                     'approved_by':'Justin', 'decision':'synthetic one-round successor', 'findings':[],
                     'successor':{'task_id':successor,'base_sha':'b'*40,'target_sha':'d'*40,
                                  'allowance':{'rounds':1,'recovery':0,'active_seconds':60}}}
+        if diagnostic:
+            assert invoke(tmp_path, task, decision) != 0
+            assert state.get_attempt(conn,successor) is None
+            return
         assert invoke(tmp_path, task, decision) == 0
         after = state.get_attempt(conn, task)
         new = state.get_attempt(conn, successor)
