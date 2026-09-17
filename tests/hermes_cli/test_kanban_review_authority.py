@@ -1,6 +1,7 @@
 """Authority regressions through public task/cohort lifecycle."""
 import pytest
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_review_state as state
 from hermes_cli import kanban_review_cohort as cohort
 from hermes_cli.kanban_db_connect import connect, write_txn
@@ -15,7 +16,7 @@ def prepared(tmp_path, monkeypatch):
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=sorted(state.REQUIRED_LANES), consumed={'rounds':0,'recovery':0,'active_seconds':0},
-        compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='synthetic operator')
+        compatibility=writer_receipts(conn), decision='synthetic operator')
     state.reserve_action(conn, owner, category='preflight', expected_version=0)
     run = kb.claim_task(conn, owner)
     lanes = {name: {'profile':'reviewer','model':'claude-sonnet-4-5','provider':'anthropic',

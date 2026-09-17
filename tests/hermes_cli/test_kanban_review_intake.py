@@ -4,6 +4,7 @@ import json
 
 from hermes_cli import kanban as cli
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli.kanban_db_connect import connect
 
 
@@ -18,7 +19,7 @@ def test_cli_enrollment_reservation_and_worker_guard_round_trip(tmp_path, monkey
         'spec_digest':'a'*64,'base_sha':'b'*40,'target_sha':'c'*40,'implementer_maker':'openai',
         'roster':['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
         'consumed':{'rounds':0,'recovery':0,'active_seconds':0},
-        'compatibility':{'cli':1,'gateway':1,'dashboard':1},'decision':'isolated synthetic operator decision'}
+        'compatibility':writer_receipts(conn),'decision':'isolated synthetic operator decision'}
     file=tmp_path/'receipt.json'
     file.write_text(json.dumps(receipt))
     wrapper=argparse.ArgumentParser()
@@ -61,7 +62,7 @@ def test_enrollment_snapshots_effective_config_and_disable_preserves_gates(tmp_p
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
             implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
             consumed={'rounds': 2, 'recovery': 1, 'active_seconds': 20},
-            compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic')
+            compatibility=writer_receipts(conn), decision='synthetic')
     try:
         task = kb.create_task(conn, title='adopt known history', assignee='builder')
         attempt = enroll(task)

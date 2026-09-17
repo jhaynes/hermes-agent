@@ -4,6 +4,7 @@ import subprocess
 import pytest
 
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_review_state as state
 from hermes_cli import kanban_review_cohort as cohort
 from hermes_cli.kanban_db_connect import connect
@@ -29,7 +30,7 @@ def test_completion_checks_actual_approved_snapshot(tmp_path, monkeypatch, mutat
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
             base_sha=sha, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
             consumed={'rounds': 0, 'recovery': 0, 'active_seconds': 0},
-            compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic')
+            compatibility=writer_receipts(conn), decision='synthetic')
         state.reserve_action(conn, owner, category='preflight', expected_version=0)
         run = kb.claim_task(conn, owner)
         cohort.record_runtime_route(conn, owner, run.current_run_id, provider='openai', model='gpt-5', isolated=False)

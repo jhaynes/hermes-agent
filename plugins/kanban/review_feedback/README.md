@@ -85,7 +85,7 @@ refuses the transaction. Successful decisions never themselves reserve a launch.
   UTF-8 approved ask. It remains held, preserves original task text and counters,
   and refuses an active/reserved frozen round. The old digest remains lineage
   history, not permission to enroll a renamed copy.
-- `successor`: adds `successor: {task_id, base_sha, target_sha, allowance}`.
+- `successor`: adds `successor: {task_id, base_sha, target_sha, allowance, compatibility}`.
   The named new task must be quiescent and unenrolled. `allowance` explicitly
   specifies finite `rounds`, `recovery`, `active_seconds`; the old attempt stays
   held/cancelled with its counters intact. The successor has a new attempt UUID,
@@ -96,10 +96,11 @@ refuses the transaction. Successful decisions never themselves reserve a launch.
   cite `rejected` only when this separate parent disposition exists; the
   disposition does not turn the old round into a clean approval.
 
-These actions do not close the remaining runtime-compatibility or migration
-contracts. In particular, the legacy three-integer compatibility assertion is
-still inadequate for deployment; verified CLI/gateway/dashboard writer receipts
-and legacy-history adjudication remain implementation blockers in the ledger.
+The three-integer compatibility assertion is now refused. See
+[writer readiness and legacy-history adoption](operator-readiness.md) for the
+supported challenge/receipt flow and explicit legacy choices. These isolated
+implementation paths do not attest installed live services or authorize rollout.
+The full build still has outstanding acceptance in the canonical ledger.
 
 ## Typed lane evidence
 

@@ -413,9 +413,19 @@ class TestDelegateTask(unittest.TestCase):
                 child_db = kwargs["session_db"]
                 self.assertIsInstance(child_db, SessionDB)
                 self.assertIsNot(child_db, parent_db)
-                self.assertEqual(
-                    str(child_db.db_path), str(parent_db.db_path)
+                # The registry resolves aliases (e.g. macOS /tmp); identity,
+                # not the spelling of a path, governs profile isolation.
+                self.assertTrue(Path(child_db.db_path).samefile(parent_db.db_path))
+                child_db.create_session(
+                    session_id="profile-child", source="subagent", model="test-model"
                 )
+                self.assertIsNotNone(parent_db.get_session("profile-child"))
+                other_db = SessionDB(db_path=Path(tmp) / "other-state.db")
+                try:
+                    self.assertFalse(Path(child_db.db_path).samefile(other_db.db_path))
+                    self.assertIsNone(other_db.get_session("profile-child"))
+                finally:
+                    other_db.close()
             finally:
                 if child_db is not None:
                     child_db.close()

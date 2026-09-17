@@ -43,7 +43,7 @@ def decide(conn, task_id, receipt):
     if (receipt['approved_by'] != 'Justin' or not isinstance(receipt['decision'], str)
             or not receipt['decision'].strip() or len(receipt['decision']) > 4096):
         raise ValueError('explicit scoped Justin decision required')
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         attempt = state.get_attempt(conn, task_id)
         if not attempt or attempt['task_id'] != task_id or not identity_valid(conn, attempt):
             raise ValueError('current managed owner identity required')
@@ -108,10 +108,12 @@ def _amend(conn, task_id, attempt, receipt):
 def _successor(conn, task_id, attempt, receipt):
     from hermes_cli import kanban_review_state as state
     from hermes_cli.kanban_postmortem import is_diagnostic
+    from hermes_cli.kanban_review_readiness import verify
     new = receipt['successor']
     if (attempt['state'] not in {'held','cancelled'} or not isinstance(new,dict)
-            or set(new) != {'task_id','base_sha','target_sha','allowance'}):
+            or set(new) != {'task_id','base_sha','target_sha','allowance','compatibility'}):
         raise ValueError('successor requires a held predecessor and exact finite allowance')
+    compatibility = verify(conn, new['compatibility'])
     allowance = new['allowance']
     if (not isinstance(allowance,dict) or set(allowance) != {'rounds','recovery','active_seconds'}
             or any(type(allowance[k]) is not int or allowance[k] < (0 if k=='recovery' else 1) for k in allowance)
@@ -131,7 +133,7 @@ def _successor(conn, task_id, attempt, receipt):
         VALUES(?,?,?,?,?,?,?,?,?,?,'preflight',0,0,0,?,?)''',
         (new_id,new['task_id'],attempt['board_id'],attempt['spec_digest'],hashlib.sha256(policy.encode()).hexdigest(),policy,
          new['base_sha'],new['target_sha'],attempt['implementer_maker'],json.dumps(attempt['roster']),
-         receipt['decision'],json.dumps(attempt['compatibility'])))
+         receipt['decision'],json.dumps(compatibility)))
     conn.execute('INSERT INTO review_successors VALUES(?,?)',(attempt['id'],new_id))
     conn.execute("UPDATE review_attempts SET version=version+1 WHERE id=?",(attempt['id'],))
 

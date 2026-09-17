@@ -1,6 +1,7 @@
 """Existing show/context surfaces expose managed review state."""
 import argparse
 import json
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 
 from hermes_cli import kanban as cli
 from hermes_cli import kanban_db as kb
@@ -17,7 +18,7 @@ def test_show_json_and_new_worker_brief_include_pinned_attempt(tmp_path, monkeyp
     attempt=state.enroll_review(conn,task,expected_status='ready',expected_run_id=None,
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
         base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
-        consumed={'rounds':2,'recovery':1,'active_seconds':20},compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic')
+        consumed={'rounds':2,'recovery':1,'active_seconds':20},compatibility=writer_receipts(conn),decision='synthetic')
     wrapper=argparse.ArgumentParser()
     cli.build_parser(wrapper.add_subparsers(dest='command'))
     args=wrapper.parse_args(['kanban','show',task,'--json'])

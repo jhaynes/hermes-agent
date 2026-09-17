@@ -13,6 +13,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import pytest
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
@@ -190,7 +191,7 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
         base_sha=base, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
         consumed={'rounds': 0, 'recovery': 0, 'active_seconds': 0},
-        compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic pilot')
+        compatibility=writer_receipts(conn), decision='synthetic pilot')
     monkeypatch.setattr(dispatch, '_resolve_hermes_argv', lambda: [sys.executable, str(root / 'tests/hermes_cli/kanban_worker_probe.py'), str(root)])
     monkeypatch.setattr(dispatch, '_profile_exists_fn', lambda: lambda p: p == 'reviewer')
     try:

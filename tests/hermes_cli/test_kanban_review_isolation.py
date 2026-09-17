@@ -5,6 +5,7 @@ from pathlib import Path
 from agent.secret_scope import is_multiplex_active, set_multiplex_active
 from gateway.run import _profile_runtime_scope
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_review_state as state
 from hermes_cli.kanban_db_connect import connect, write_txn
@@ -42,7 +43,7 @@ def test_two_profile_scopes_keep_incidents_counters_and_lessons_separate(tmp_pat
                     board_id=board,spec_digest='a'*64,base_sha='b'*40,target_sha='c'*40,
                     implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
                     consumed={'rounds':1 if name=='a' else 2,'recovery':0,'active_seconds':0},
-                    compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic scope')
+                    compatibility=writer_receipts(conn),decision='synthetic scope')
                 with write_txn(conn):
                     kb._append_event(conn,task,'timed_out',{'elapsed_seconds':12,'limit_seconds':10},run_id=1)
                 incident=dict(conn.execute('SELECT * FROM workflow_incidents').fetchone())

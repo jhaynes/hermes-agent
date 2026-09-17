@@ -3,6 +3,7 @@ import argparse
 import json
 import hashlib
 import pytest
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban as cli
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_review_state as state
@@ -28,7 +29,7 @@ def test_scoped_operator_decision_preserves_budgets(tmp_path, monkeypatch, opera
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
             roster=sorted(state.REQUIRED_LANES), consumed={'rounds':1,'recovery':1,'active_seconds':25},
-            compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='synthetic')
+            compatibility=writer_receipts(conn), decision='synthetic')
         with write_txn(conn):
             state.hold(conn, attempt, 'operator_hold')
         decision = {'operation':operation, 'attempt_id':attempt['id'], 'expected_version':1,
@@ -57,7 +58,7 @@ def test_scoped_operator_decision_preserves_budgets(tmp_path, monkeypatch, opera
                     board_id=attempt['board_id'], spec_digest=attempt['spec_digest'],
                     base_sha=attempt['base_sha'], target_sha=attempt['target_sha'], implementer_maker='openai',
                     roster=attempt['roster'], consumed={'rounds':0,'recovery':0,'active_seconds':0},
-                    compatibility=attempt['compatibility'], decision='recreation is not authority')
+                    compatibility=attempt['compatibility']['selection'], decision='recreation is not authority')
 
 
 @pytest.mark.parametrize('diagnostic', [False, True])
@@ -71,7 +72,7 @@ def test_exhausted_predecessor_needs_explicit_finite_successor(tmp_path, monkeyp
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
             roster=sorted(state.REQUIRED_LANES), consumed={'rounds':3,'recovery':2,'active_seconds':7200},
-            compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='known exhausted history')
+            compatibility=writer_receipts(conn), decision='known exhausted history')
         successor = kb.create_task(conn, title='explicit next phase', assignee='builder')
         if diagnostic:
             from hermes_cli.config import save_config
@@ -86,6 +87,7 @@ def test_exhausted_predecessor_needs_explicit_finite_successor(tmp_path, monkeyp
                     'base_sha':attempt['base_sha'], 'target_sha':attempt['target_sha'],
                     'approved_by':'Justin', 'decision':'synthetic one-round successor', 'findings':[],
                     'successor':{'task_id':successor,'base_sha':'b'*40,'target_sha':'d'*40,
+                                 'compatibility':writer_receipts(conn),
                                  'allowance':{'rounds':1,'recovery':0,'active_seconds':60}}}
         if diagnostic:
             assert invoke(tmp_path, task, decision) != 0
@@ -118,7 +120,7 @@ def test_parent_finding_disposition_retains_original_receipt(tmp_path, monkeypat
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64,base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',
             roster=sorted(state.REQUIRED_LANES),consumed={'rounds':0,'recovery':0,'active_seconds':0},
-            compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic')
+            compatibility=writer_receipts(conn),decision='synthetic')
         state.reserve_action(conn,task,category='preflight',expected_version=0)
         run = kb.claim_task(conn,task)
         cohort.record_runtime_route(conn,task,run.current_run_id,provider='openai',model='gpt-5',isolated=False)

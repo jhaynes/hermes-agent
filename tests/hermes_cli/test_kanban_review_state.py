@@ -1,5 +1,6 @@
 """Bounded review enrollment and admission contracts on temporary boards."""
 import pytest
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 import importlib.util
 from hermes_cli import kanban_db as kb
 from hermes_cli.kanban_db_connect import connect
@@ -20,14 +21,14 @@ def test_enrollment_pins_lineage_and_refuses_legacy_approval(tmp_path, monkeypat
                          target_sha='c'*40, implementer_maker='openai',
                          roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
                          consumed={'rounds':0,'recovery':0,'active_seconds':0},
-                         compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='synthetic operator decision')
+                         compatibility=writer_receipts(conn), decision='synthetic operator decision')
         assert attempt['state'] == 'preflight'
         with pytest.raises(ValueError, match='already enrolled'):
             enroll(conn, task, expected_status='ready', expected_run_id=None,
                    board_id=board_id, spec_digest='d'*64, base_sha='b'*40,
                    target_sha='c'*40, implementer_maker='openai', roster=attempt['roster'],
                    consumed={'rounds':0,'recovery':0,'active_seconds':0},
-                   compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='reset attempt')
+                   compatibility=writer_receipts(conn), decision='reset attempt')
         assert kb.complete_task(conn, task, summary='ordinary approval') is False
         assert kb.get_task(conn, task).status == 'ready'
     finally:
@@ -47,7 +48,7 @@ def test_exhausted_migration_cannot_dispatch_or_downgrade(tmp_path, monkeypatch)
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
         consumed={'rounds':3,'recovery':2,'active_seconds':90},
-        compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='preserve consumed history')
+        compatibility=writer_receipts(conn), decision='preserve consumed history')
     assert attempt['state'] == 'held'
     assert kb.claim_task(conn, task) is None, 'Managed hold must override ready column/manual claim'
     monkeypatch.setattr(dispatch, '_profile_exists_fn', lambda: lambda _: True)
@@ -76,7 +77,7 @@ def test_failed_preflight_cannot_native_respawn_or_reset_shared_recovery(tmp_pat
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
         consumed={'rounds':0,'recovery':0,'active_seconds':0},
-        compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='synthetic')
+        compatibility=writer_receipts(conn), decision='synthetic')
     reserve = getattr(state, 'reserve_action', None)
     assert callable(reserve), 'Managed workers require a durable action reservation'
     for retry in range(3):
@@ -111,7 +112,7 @@ def test_running_time_is_charged_but_queue_wait_is_not(tmp_path, monkeypatch):
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
         consumed={'rounds':0,'recovery':0,'active_seconds':10},
-        compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='synthetic')
+        compatibility=writer_receipts(conn), decision='synthetic')
     now = [100.0]
     monkeypatch.setattr(state.time, 'monotonic', lambda: now[0])
     state.reserve_action(conn, task, category='preflight', expected_version=0)

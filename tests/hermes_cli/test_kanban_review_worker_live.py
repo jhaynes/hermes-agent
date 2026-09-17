@@ -10,6 +10,7 @@ import psutil
 import pytest
 
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli import kanban_review_state as state
 from hermes_cli import kanban_review_cohort as cohort
@@ -81,7 +82,7 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
     attempt = state.enroll_review(conn,owner,expected_status='ready',expected_run_id=None,
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
         base_sha=sha,target_sha=sha,implementer_maker=implementer,roster=sorted(state.REQUIRED_LANES),
-        consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic only')
+        consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility=writer_receipts(conn),decision='synthetic only')
     state.reserve_action(conn,owner,category='preflight',expected_version=0)
     if phase == 'review':
         run=kb.claim_task(conn,owner)

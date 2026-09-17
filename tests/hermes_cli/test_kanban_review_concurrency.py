@@ -7,6 +7,7 @@ from pathlib import Path
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_dispatch as dispatch
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_review_state as state
 from hermes_cli.kanban_db_connect import connect
 
@@ -42,7 +43,7 @@ def test_recovery_and_claim_are_atomic_across_processes(tmp_path, monkeypatch):
     attempt = state.enroll_review(conn,task,expected_status='ready',expected_run_id=None,
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
         base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
-        consumed={'rounds':0,'recovery':1,'active_seconds':0},compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic')
+        consumed={'rounds':0,'recovery':1,'active_seconds':0},compatibility=writer_receipts(conn),decision='synthetic')
     state.reserve_action(conn,task,category='preflight',expected_version=0)
     assert kb.claim_task(conn,task)
     dispatch._record_task_failure(conn,task,'synthetic failure',outcome='spawn_failed',failure_limit=100,release_claim=True,end_run=True)

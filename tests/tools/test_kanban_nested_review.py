@@ -2,6 +2,7 @@
 import json
 
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_review_state as state
 from hermes_cli import kanban_review_cohort as cohort
 from hermes_cli.kanban_db_connect import connect
@@ -18,7 +19,7 @@ def test_reviewer_cannot_spawn_delegate_or_replacement_card(tmp_path, monkeypatc
         attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
             base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
-            consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic')
+            consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility=writer_receipts(conn),decision='synthetic')
         state.reserve_action(conn, owner, category='preflight',expected_version=0)
         run = kb.claim_task(conn, owner)
         cohort.record_runtime_route(conn, owner, run.current_run_id,provider='openai',model='gpt-5',isolated=False)

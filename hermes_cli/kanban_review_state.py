@@ -37,6 +37,10 @@ def initialize(conn):
         initialize_cohort(conn)
         from hermes_cli.kanban_review_operator import initialize as initialize_operator
         initialize_operator(conn)
+        from hermes_cli.kanban_review_readiness import initialize as initialize_readiness
+        initialize_readiness(conn)
+        from hermes_cli.kanban_review_legacy import initialize as initialize_legacy
+        initialize_legacy(conn)
         if conn.execute('SELECT 1 FROM review_attempts LIMIT 1').fetchone():
             install_guard(conn)
 
@@ -255,8 +259,7 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
                   consumed, compatibility, decision):
     """Operator-only CAS at a quiescent boundary; supplied history never defaults to zero.
 
-    Compatibility is the operator's receipt for all three writers, not provider
-    attestation. The operational preflight owns verifying those runtime versions.
+    Compatibility selects persisted capability receipts from all three writers.
     """
     if os.environ.get('HERMES_KANBAN_TASK'):
         raise PermissionError('workers cannot authorize enrollment')
@@ -265,8 +268,7 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
     for value, size in ((spec_digest, 64), (base_sha, 40), (target_sha, 40)):
         if not isinstance(value, str) or not re.fullmatch('[0-9a-f]{'+str(size)+'}', value):
             raise ValueError('exact spec digest and base/target SHA required')
-    if compatibility != {'cli': 1, 'gateway': 1, 'dashboard': 1}:
-        raise ValueError('verified compatible CLI, gateway and dashboard receipts required')
+
     if implementer_maker not in {'openai', 'anthropic', 'google', 'nous', 'xai', 'deepseek'}:
         raise ValueError('known implementer maker required')
     if not isinstance(roster, list) or len(roster) != len(set(roster)) or not REQUIRED_LANES <= set(roster):
@@ -291,10 +293,14 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
             raise ValueError(f'kanban.review_feedback.{key} requires a finite integer budget')
         effective[key] = value
     policy = json.dumps(effective, sort_keys=True, separators=(',', ':'))
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         from hermes_cli.kanban_db import _append_event
+        from hermes_cli.kanban_review_readiness import verify
+        compatibility = verify(conn, compatibility)
         if get_attempt(conn, task_id):
             raise ValueError('task already enrolled; new task/policy/spec is not reset authority')
+        from hermes_cli.kanban_review_legacy import require_adjudication
+        require_adjudication(conn, task_id, spec_digest, consumed)
         if (conn.execute('SELECT 1 FROM review_attempts WHERE spec_digest=?', (spec_digest,)).fetchone()
                 or conn.execute("SELECT 1 FROM review_decisions WHERE json_extract(receipt,'$.spec_digest')=?", (spec_digest,)).fetchone()):
             raise ValueError('managed ask already has a lineage; recreation is not successor authority')
@@ -307,8 +313,10 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
         row = conn.execute('SELECT status,current_run_id,worker_pid FROM tasks WHERE id=?', (task_id,)).fetchone()
         if not row or tuple(row[:2]) != (expected_status, expected_run_id):
             raise ValueError('enrollment CAS lost')
-        if expected_run_id is not None or row['worker_pid'] is not None or expected_status not in {'ready', 'review', 'blocked'}:
+        if expected_run_id is not None or row['worker_pid'] is not None or expected_status not in {'ready', 'review', 'blocked', 'done', 'scheduled'}:
             raise ValueError('enrollment requires a quiescent safe boundary')
+        if expected_status in {'done','scheduled'}:
+            conn.execute("UPDATE tasks SET status='blocked',block_kind='needs_input' WHERE id=?", (task_id,))
         exhausted = consumed['rounds'] >= effective['rounds'] or active >= effective['active_seconds']
         install_guard(conn)
         attempt_id = str(uuid.uuid4())

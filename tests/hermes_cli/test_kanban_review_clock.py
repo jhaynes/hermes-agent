@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from hermes_cli import kanban_db as kb
+from tests.hermes_cli.review_readiness_helpers import writer_receipts
 from hermes_cli import kanban_review_cohort as cohort
 from hermes_cli import kanban_review_state as state
 from hermes_cli.kanban_db_connect import connect
@@ -20,7 +21,7 @@ def reviewing(tmp_path, monkeypatch, active=7190):
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
         implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
         consumed={'rounds': 0, 'recovery': 0, 'active_seconds': active},
-        compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic')
+        compatibility=writer_receipts(conn), decision='synthetic')
     now = [100.0]
     monkeypatch.setattr(state.time, 'monotonic', lambda: now[0])
     state.reserve_action(conn, owner, category='preflight', expected_version=0)

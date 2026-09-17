@@ -21,6 +21,18 @@ def _object_file(path):
 def enroll(args):
     from hermes_cli.kanban_review_state import enroll_review
     receipt=_object_file(args.receipt)
+    if receipt == {'operation':'readiness'}:
+        from hermes_cli.kanban_review_readiness import begin, issue
+        with connect_closing() as conn:
+            result = issue(conn, begin(conn), 'cli')
+        print(json.dumps(result, sort_keys=True))
+        return 0
+    if receipt.get('operation') == 'legacy-history':
+        from hermes_cli.kanban_review_legacy import adjudicate
+        with connect_closing() as conn:
+            result = adjudicate(conn, args.task_id, receipt)
+        print(json.dumps(result, sort_keys=True))
+        return 0
     if 'operation' in receipt:
         from hermes_cli.kanban_review_operator import decide
         with connect_closing() as conn:

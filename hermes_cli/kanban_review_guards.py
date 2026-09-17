@@ -36,9 +36,10 @@ def reject_nested_creation(conn, creator_task_id):
 def identity_valid(conn, attempt):
     import hashlib
     import json
+    from hermes_cli.kanban_review_readiness import compatible
     board = conn.execute('SELECT board_id,schema_version FROM workflow_board WHERE singleton=1').fetchone()
     policy = attempt['policy']
-    return (board is not None and tuple(board) == (attempt['board_id'], 1)
+    return (compatible(attempt) and board is not None and tuple(board) == (attempt['board_id'], 1)
             and isinstance(policy, dict) and policy.get('version') == 1
             and hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == attempt['policy_digest'])
 
