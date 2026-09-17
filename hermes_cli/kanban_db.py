@@ -1905,10 +1905,13 @@ def _append_event(
     run_id: Optional[int] = None,
 ) -> None:
     """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
-    conn.execute(
+    now = int(time.time())
+    cursor = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
+        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), now),
     )
+    from hermes_cli.kanban_workflow_incidents import capture_event
+    capture_event(conn, cursor.lastrowid, task_id, run_id, kind, payload, now)
 
 
 def _end_run(
@@ -1942,6 +1945,8 @@ def _end_run(
         (status or outcome, outcome, summary, error, _json_or_null(metadata), now, run_id),
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
+    from hermes_cli.kanban_review_state import released
+    released(conn, task_id, run_id, outcome)
     return run_id
 
 
@@ -2163,6 +2168,9 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_review_state import claim_allowed
+    if not claim_allowed(conn, task_id):
+        return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -2197,6 +2205,8 @@ def _claim_and_open_run(
     )
     run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
+    from hermes_cli.kanban_review_state import claimed
+    claimed(conn, task_id, run_id)
     _append_event(
         conn, task_id, "claimed",
         {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
@@ -2687,6 +2697,9 @@ def complete_task(
     with write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
+        from hermes_cli.kanban_review_state import completion_allowed
+        if not completion_allowed(conn, task_id, expected_run_id, metadata):
+            return False
         if not _parents_satisfied(conn, task_id):
             return False
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
