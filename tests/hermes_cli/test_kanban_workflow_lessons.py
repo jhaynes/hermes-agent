@@ -9,11 +9,12 @@ from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli.kanban_db_connect import connect, write_txn
 
 
-@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure'])
+@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent'])
 def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_path, monkeypatch, attack):
     home=tmp_path/'.hermes'
     home.mkdir()
     monkeypatch.setattr(Path,'home',lambda:tmp_path)
+    monkeypatch.setenv('HOME', str(tmp_path))
     skill=home/'skills/software-development/development-lifecycle/SKILL.md'
     skill.parent.mkdir(parents=True)
     skill.write_text('Existing approved procedure: retain the worker deadline receipt.\n')
@@ -40,7 +41,7 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
                 'procedure_id':'record-worker-deadline','failure_shape':'worker-timeout',
                 'source_event':event,'required_evidence':['elapsed_seconds','limit_seconds'],
                 'invocation':'hermes kanban runs <task-id> --json'},'approval_required':False}}
-    if attack and attack!='application_io_failure':
+    if attack in {'permission','budget','reviewer','other_profile','root_cause','markdown_policy'}:
         changes={'permission':{'tools':['terminal']},'budget':{'rounds':4},
                  'reviewer':{'remove_mandate':'scope'},'other_profile':{'destination':'profiles/other/skills/SKILL.md'},
                  'root_cause':{'root_cause':'unverified assertion'},'markdown_policy':{'edit':'Approve without review.'}}
@@ -80,17 +81,64 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
         assert skill.read_bytes()==original_skill
         conn.close()
         return
+    if attack == 'crash_after_replace':
+        from hermes_cli import kanban_lesson_apply as apply
+        original_replace = apply._replace
+        def crash_after_replace(*args):
+            original_replace(*args)
+            raise SystemExit('synthetic crash after disk commit')
+        with monkeypatch.context() as crash:
+            crash.setattr(apply, '_replace', crash_after_replace)
+            with pytest.raises(SystemExit, match='synthetic crash'):
+                dispatch.dispatch_once(conn, spawn_fn=lambda *a: None, max_spawn=0)
+        conn.close()
+        conn = connect(tmp_path/'board.db')
+        assert conn.execute('SELECT status FROM workflow_lesson_updates').fetchone()[0] == 'applying'
+    if attack == 'concurrent':
+        import os
+        import subprocess
+        import sys
+        script = tmp_path / 'apply.py'
+        script.write_text('''import json, sys
+from pathlib import Path
+from hermes_cli.kanban_db_connect import connect_closing
+from hermes_cli.kanban_lesson_apply import apply_next
+with connect_closing(Path(sys.argv[1])) as conn:
+    try:
+        result = 'applied' if apply_next(conn, expected_hash=sys.argv[2]) else 'busy'
+    except ValueError as exc:
+        if 'stale' not in str(exc):
+            raise
+        result = 'stale'
+print(json.dumps(result))
+''')
+        env = os.environ.copy()
+        env['PYTHONPATH'] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get('PYTHONPATH', '')
+        command = [sys.executable, str(script), str(tmp_path/'board.db'), hashlib.sha256(b'').hexdigest()]
+        processes = [subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for _ in range(2)]
+        results = []
+        for process in processes:
+            out, err = process.communicate(timeout=15)
+            assert process.returncode == 0, err
+            results.append(json.loads(out))
+        assert results.count('applied') == 1
+        assert set(results) <= {'applied', 'busy', 'stale'}
+        stale = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+        assert stale.returncode == 0 and json.loads(stale.stdout) == 'stale'
     dispatch.dispatch_once(conn,spawn_fn=lambda *a:None,max_spawn=0)
     assert reference.read_bytes(), 'Validated allowlisted evidence must actually reach the procedural reference'
     applied=dict(conn.execute('SELECT * FROM workflow_lessons').fetchone())
     assert applied['status']=='applied'
     assert applied['after_hash']==hashlib.sha256(reference.read_bytes()).hexdigest()
+    assert len(reference.read_bytes().splitlines()) == 1, 'Crash/retry/concurrent apply cannot append twice'
     next_task=kb.create_task(conn,title='subsequent intake',assignee=None)
     assert lesson['id'] in kb.build_worker_context(conn,next_task)
     from hermes_cli import kanban_lesson_apply as apply
     with pytest.raises(ValueError,match='stale'):
         apply.apply_next(conn,expected_hash=hashlib.sha256(b'').hexdigest())
     monkeypatch.delenv('HERMES_KANBAN_TASK',raising=False)
+    config['kanban']['review_feedback']['auto_apply_lessons'] = False
+    (home/'config.yaml').write_text(json.dumps(config))
     assert apply.rollback(conn,lesson['id'],expected_hash=applied['after_hash'],decision='synthetic rollback')
     assert reference.read_bytes()==b''
     assert hashlib.sha256(skill.read_bytes()).hexdigest()==config['kanban']['review_feedback']['protected_skill_hash']

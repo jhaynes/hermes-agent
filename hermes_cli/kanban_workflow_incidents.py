@@ -71,19 +71,21 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
         if cause and cause['kind']==(payload or {}).get('trigger_outcome'):
             run_id=cause['run_id']
     board = conn.execute("SELECT board_id FROM workflow_board WHERE singleton=1").fetchone()[0]
+    typed = (payload or {}).get('kind')
+    expected = kind == 'dependency_wait' or (kind == 'blocked' and typed in {'dependency', 'needs_input'})
+    classification = 'expected_wait' if expected else 'failure'
     # A terminal run's crash/gave_up/block cascade is one causal episode.
     # Runless transitions are independent unless replaying that exact event.
     episode = f"{board}:{task_id}:" + (f"run:{run_id}" if run_id is not None else f"event:{event_id}")
-    prior = conn.execute("SELECT * FROM workflow_incidents WHERE episode_key=?", (episode,)).fetchone()
+    classified_episode = f'{episode}:{classification}'
+    prior = conn.execute("SELECT * FROM workflow_incidents WHERE episode_key IN (?,?) AND classification=?",
+                         (episode, classified_episode, classification)).fetchone()
     if prior:
         events = json.loads(prior['source_events'])
         if event_id not in events:
             events.append(event_id)
             conn.execute("UPDATE workflow_incidents SET source_events=? WHERE id=?", (json.dumps(events), prior['id']))
         return
-    typed = (payload or {}).get('kind')
-    expected = kind == 'dependency_wait' or (kind == 'blocked' and typed in {'dependency', 'needs_input'})
-    classification = 'expected_wait' if expected else 'failure'
     fingerprint = f"{task_id}:{classification}:{kind}"
     previous = conn.execute(
         "SELECT id FROM workflow_incidents WHERE fingerprint=? ORDER BY rowid DESC LIMIT 1", (fingerprint,),
@@ -98,7 +100,7 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
         (id,board_id,task_id,run_id,episode_key,fingerprint,prior_incident_id,
          classification,report_status,source_events,report,created_at)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-        (str(uuid.uuid4()), board, task_id, run_id, episode, fingerprint,
+        (str(uuid.uuid4()), board, task_id, run_id, classified_episode, fingerprint,
          previous[0] if previous else None, classification,
          'complete' if expected else 'queued', json.dumps([event_id]), report, created_at),
     )

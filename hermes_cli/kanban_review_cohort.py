@@ -98,6 +98,19 @@ def record_runtime_route(conn, task_id, run_id, *, provider, model, isolated):
         if not attempt or not current or current[0] != run_id:
             raise ValueError('stale worker route')
         maker = model_maker(provider, model)
+        if task_id == attempt['task_id']:
+            if maker is None or maker != attempt['implementer_maker']:
+                raise ValueError('implementer route differs from enrolled maker')
+            from hermes_cli import kanban_db as kb
+            receipt = {key: attempt[key] for key in ('board_id', 'spec_digest', 'policy_digest', 'base_sha', 'target_sha')}
+            receipt.update(attempt_id=attempt['id'], task_id=task_id, run_id=run_id,
+                           provider=provider, model=model, maker=maker)
+            old = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='runtime_route_verified' LIMIT 1", (task_id, run_id)).fetchone()
+            if old and json.loads(old[0]) != receipt:
+                raise ValueError('implementer route differs from pinned runtime receipt')
+            if not old:
+                kb._append_event(conn, task_id, 'runtime_route_verified', receipt, run_id=run_id)
+            return
         if maker is None or maker == attempt['implementer_maker'] or not isolated:
             raise ValueError('unverified or non-independent reviewer route')
         conn.execute('UPDATE review_members SET run_id=?,provider=?,model=?,maker=?,isolated=? WHERE task_id=?',

@@ -22,6 +22,27 @@ def test_block_capture_is_durable_without_observers(tmp_path, monkeypatch):
         conn.close()
 
 
+def test_wait_does_not_downgrade_a_later_failure_in_same_run(tmp_path):
+    from hermes_cli.kanban_db_connect import write_txn
+    from hermes_cli.kanban_workflow_incidents import reconcile_events
+
+    conn = connect(tmp_path / 'board.db')
+    try:
+        task = kb.create_task(conn, title='wait followed by teardown failure', assignee='builder')
+        run = kb.claim_task(conn, task)
+        assert run is not None
+        assert kb.block_task(conn, task, kind='needs_input', reason='approval wait', expected_run_id=run.current_run_id)
+        with write_txn(conn):
+            kb._append_event(conn, task, 'crashed', {}, run_id=run.current_run_id)
+        reconcile_events(conn)
+        incidents = conn.execute('SELECT classification,report_status FROM workflow_incidents ORDER BY rowid').fetchall()
+        assert [tuple(row) for row in incidents] == [('expected_wait', 'complete'), ('failure', 'queued')]
+        reconcile_events(conn)
+        assert conn.execute('SELECT COUNT(*) FROM workflow_incidents').fetchone()[0] == 2
+    finally:
+        conn.close()
+
+
 def test_dispatch_reconciles_missed_capture_once_and_links_recurrence(tmp_path, monkeypatch):
     from hermes_cli import kanban_db_dispatch as dispatch
     from hermes_cli import kanban_workflow_incidents as incidents

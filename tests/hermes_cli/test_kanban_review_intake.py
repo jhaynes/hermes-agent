@@ -43,3 +43,36 @@ def test_cli_enrollment_reservation_and_worker_guard_round_trip(tmp_path, monkey
     assert cli.kanban_command(args)==0
     assert json.loads(capsys.readouterr().out)['round_id']
     conn.close()
+
+
+def test_enrollment_snapshots_effective_config_and_disable_preserves_gates(tmp_path, monkeypatch):
+    import pytest
+    from hermes_cli.config import save_config
+    from hermes_cli import kanban_review_state as state
+
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    save_config({'kanban': {'review_feedback': {'rounds': 2, 'recovery': 1, 'active_seconds': 60}}})
+    conn = connect(tmp_path / 'board.db')
+    def enroll(task):
+        return state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
+            board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
+            spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
+            implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
+            consumed={'rounds': 2, 'recovery': 1, 'active_seconds': 20},
+            compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic')
+    try:
+        task = kb.create_task(conn, title='adopt known history', assignee='builder')
+        attempt = enroll(task)
+        assert attempt['policy']['rounds'] == 2, 'Attempt must use effective registered policy, not module defaults'
+        assert attempt['policy']['recovery'] == 1
+        assert attempt['policy']['active_seconds'] == 60
+        assert attempt['state'] == 'held'
+        save_config({'kanban': {'review_feedback': {'intake_enabled': False, 'rounds': 3}}})
+        assert state.get_attempt(conn, task)['policy_digest'] == attempt['policy_digest']
+        assert kb.claim_task(conn, task) is None
+        other = kb.create_task(conn, title='new unmanaged work', assignee='builder')
+        with pytest.raises(ValueError, match='intake disabled'):
+            enroll(other)
+        assert kb.claim_task(conn, other) is not None, 'Disabled intake must preserve genuine legacy behavior'
+    finally:
+        conn.close()

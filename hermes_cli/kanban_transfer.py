@@ -71,6 +71,8 @@ def _scrub_local_state(conn: sqlite3.Connection) -> None:
     """Strip machine-local runtime state (claims, PIDs, and above all the
     gateway chat ids subscribed to task events). Caller owns the transaction.
     Run on export and again on import (an archive is untrusted input)."""
+    from hermes_cli.kanban_review_transfer import park_snapshot
+    park_snapshot(conn)
     conn.execute("DELETE FROM kanban_notify_subs")
     conn.execute(
         """
@@ -140,6 +142,7 @@ def export_board(
         # The snapshot is a private file with no other writers, so plain
         # commit/close is enough — no need for the board DB's WAL dance.
         with contextlib.closing(sqlite3.connect(str(staged / "kanban.db"))) as snapshot:
+            snapshot.row_factory = sqlite3.Row
             _scrub_local_state(snapshot)
             snapshot.commit()
             counts = _count_rows(snapshot)
@@ -248,6 +251,8 @@ def _relocate_imported_rows(conn: sqlite3.Connection, slug: str) -> tuple[dict[s
 
     with kb.write_txn(conn):
         _scrub_local_state(conn)
+        from hermes_cli.kanban_review_transfer import park_snapshot
+        park_snapshot(conn, new_identity=True)
 
         dropped = rehomed = 0
         for row in conn.execute("SELECT id, task_id, stored_path FROM task_attachments").fetchall():

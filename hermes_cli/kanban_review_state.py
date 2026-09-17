@@ -11,8 +11,6 @@ import uuid
 
 from hermes_cli.kanban_db_connect import write_txn
 
-POLICY = {'version': 1, 'rounds': 3, 'recovery': 2, 'active_seconds': 7200,
-          'postmortem_runs': 2, 'postmortem_seconds': 600}
 REQUIRED_LANES = frozenset({'tests', 'quality', 'architecture', 'style',
                             'breaker_a', 'breaker_b', 'breaker_c', 'scope'})
 
@@ -37,9 +35,13 @@ def initialize(conn):
             monotonic_at REAL NOT NULL, wall_at REAL NOT NULL)''')
         from hermes_cli.kanban_review_cohort import initialize as initialize_cohort
         initialize_cohort(conn)
+        if conn.execute('SELECT 1 FROM review_attempts LIMIT 1').fetchone():
+            install_guard(conn)
 
 
 def install_guard(conn):
+    from hermes_cli.kanban_review_guards import install
+    install(conn)
     # A board with no enrollment must remain usable by legacy writers. SQLite
     # resolves UDFs at statement preparation, even when a trigger WHEN is false.
     conn.execute('''CREATE TRIGGER IF NOT EXISTS review_task_guard
@@ -63,17 +65,23 @@ def transition_allowed(conn, task_id, status):
     attempt = get_attempt(conn, task_id)
     if attempt is None:
         return True
-    if attempt['policy']['version'] != 1:
+    if status in {'blocked', 'review', 'todo', 'triage', 'ready'}:
+        return True
+    from hermes_cli.kanban_review_guards import identity_valid
+    if not identity_valid(conn, attempt):
         return False
     if status == 'done':
         member = conn.execute('SELECT state FROM review_members WHERE task_id=?', (task_id,)).fetchone()
-        return member[0] in {'received_valid','invalid','failed'} if member else attempt['state'] == 'approved'
+        if member:
+            return member[0] in {'received_valid','invalid','failed'}
+        from hermes_cli.kanban_review_guards import snapshot_matches
+        return attempt['state'] == 'approved' and snapshot_matches(conn, attempt)
     if status == 'running':
-        return claim_allowed(conn, task_id)
+        return claim_allowed(conn, task_id, settle=False)
     return status in {'blocked', 'review', 'todo', 'triage', 'ready'}
 
 
-def claim_allowed(conn, task_id):
+def claim_allowed(conn, task_id, *, settle=True):
     # Managed dispatch requires an explicit workflow action reservation. Until
     # one is admitted, even a manually changed ready column grants no authority.
     from hermes_cli.kanban_postmortem import claim_allowed as diagnostic_allowed
@@ -82,6 +90,13 @@ def claim_allowed(conn, task_id):
     attempt = get_attempt(conn, task_id)
     if attempt is None:
         return True
+    if settle:
+        from hermes_cli.kanban_review_guards import identity_valid
+        if not identity_valid(conn, attempt):
+            hold(conn, attempt, 'workflow_identity_mismatch')
+            return False
+        settle_clock(conn, attempt)
+        attempt = get_attempt(conn, task_id)
     if attempt['state'] not in {'preflight', 'reviewing', 'repair'}:
         return False
     return conn.execute("SELECT 1 FROM review_actions WHERE task_id=? AND state='reserved'", (task_id,)).fetchone() is not None
@@ -137,8 +152,6 @@ def claimed(conn, task_id, run_id):
     attempt = get_attempt(conn, task_id)
     if attempt is None:
         return
-    settle_clock(conn, attempt)
-    attempt = get_attempt(conn, task_id)
     row = conn.execute('SELECT max_runtime_seconds FROM tasks WHERE id=?', (task_id,)).fetchone()
     remaining = max(1, math.floor(attempt['policy']['active_seconds'] - attempt['active_seconds']))
     cap = min(remaining, row[0]) if row[0] and row[0] > 0 else remaining
@@ -155,6 +168,7 @@ def released(conn, task_id, run_id, outcome, metadata=None):
     attempt = get_attempt(conn, task_id)
     if attempt is not None:
         settle_clock(conn, attempt)
+        attempt = get_attempt(conn, task_id)
     conn.execute("UPDATE review_actions SET state=? WHERE task_id=? AND run_id=? AND state='running'",
                  ('complete' if outcome in {'completed','review_requested'} else 'failed', task_id,run_id))
     from hermes_cli.kanban_review_cohort import released as cohort_released
@@ -168,6 +182,8 @@ def handoff_allowed(conn, task_id, run_id, metadata):
     attempt = get_attempt(conn, task_id)
     if attempt is None:
         return True
+    settle_clock(conn, attempt)
+    attempt = get_attempt(conn, task_id)
     if task_id != attempt['task_id'] or attempt['state'] not in {'preflight','repair'}:
         return False
     action = conn.execute("SELECT 1 FROM review_actions WHERE task_id=? AND run_id=? AND state='running'", (task_id,run_id)).fetchone()
@@ -193,9 +209,28 @@ def settle_clock(conn, attempt):
             return
         elapsed = mono - clock['monotonic_at']
         conn.execute('UPDATE review_attempts SET active_seconds=active_seconds+? WHERE id=?', (elapsed, attempt['id']))
+        if (attempt['state'] not in {'held', 'cancelled'}
+                and attempt['active_seconds'] + elapsed >= attempt['policy']['active_seconds']):
+            hold(conn, attempt, 'active_time_exhausted')
     conn.execute('''INSERT INTO review_clock VALUES(?,?,?,?)
         ON CONFLICT(attempt_id) DO UPDATE SET boot_id=excluded.boot_id,
         monotonic_at=excluded.monotonic_at,wall_at=excluded.wall_at''', (attempt['id'],boot,mono,wall))
+
+
+def supervision_deadlines(conn):
+    """Settle each live union once; a hold revokes every outstanding worker."""
+    deadlines = {}
+    with write_txn(conn):
+        owners = conn.execute("""SELECT task_id FROM review_attempts WHERE id IN
+            (SELECT attempt_id FROM review_actions WHERE state='running')""").fetchall()
+        for owner in owners:
+            attempt = get_attempt(conn, owner[0])
+            settle_clock(conn, attempt)
+            attempt = get_attempt(conn, owner[0])
+            revoked = attempt['state'] in {'held', 'cancelled'}
+            for action in conn.execute("SELECT task_id,deadline FROM review_actions WHERE attempt_id=? AND state='running'", (attempt['id'],)):
+                deadlines[action['task_id']] = 0 if revoked else action['deadline']
+    return deadlines
 
 
 def get_attempt(conn, task_id):
@@ -238,11 +273,23 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
     active = consumed['active_seconds']
     if type(active) not in (int, float) or not math.isfinite(active) or active < 0:
         raise ValueError('invalid consumed active time')
-    policy = json.dumps(POLICY, sort_keys=True, separators=(',', ':'))
+    from hermes_cli.config import load_config
+    config = load_config()['kanban']['review_feedback']
+    if config['intake_enabled'] is not True:
+        raise ValueError('managed review intake disabled; existing gates remain enforced')
+    effective = {'version': 1}
+    for key in ('rounds', 'recovery', 'active_seconds'):
+        value = config[key]
+        if type(value) is not int or value < (0 if key == 'recovery' else 1):
+            raise ValueError(f'kanban.review_feedback.{key} requires a finite integer budget')
+        effective[key] = value
+    policy = json.dumps(effective, sort_keys=True, separators=(',', ':'))
     with write_txn(conn):
         from hermes_cli.kanban_db import _append_event
         if get_attempt(conn, task_id):
             raise ValueError('task already enrolled; new task/policy/spec is not reset authority')
+        if conn.execute('SELECT 1 FROM review_attempts WHERE spec_digest=?', (spec_digest,)).fetchone():
+            raise ValueError('managed ask already has a lineage; recreation is not successor authority')
         from hermes_cli.kanban_postmortem import is_diagnostic
         if is_diagnostic(conn, task_id):
             raise ValueError('diagnostic tasks cannot enroll as implementations')
@@ -254,7 +301,7 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
             raise ValueError('enrollment CAS lost')
         if expected_run_id is not None or row['worker_pid'] is not None or expected_status not in {'ready', 'review', 'blocked'}:
             raise ValueError('enrollment requires a quiescent safe boundary')
-        exhausted = consumed['rounds'] >= POLICY['rounds'] or active >= POLICY['active_seconds']
+        exhausted = consumed['rounds'] >= effective['rounds'] or active >= effective['active_seconds']
         install_guard(conn)
         attempt_id = str(uuid.uuid4())
         conn.execute('''INSERT INTO review_attempts
@@ -270,6 +317,20 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
 
 
 def completion_allowed(conn, task_id, run_id=None, metadata=None):
+    attempt = get_attempt(conn, task_id)
+    if attempt is not None:
+        from hermes_cli.kanban_review_guards import identity_valid
+        if not identity_valid(conn, attempt):
+            hold(conn, attempt, 'workflow_identity_mismatch')
+            return False
+        settle_clock(conn, attempt)
+        attempt = get_attempt(conn, task_id)
+        if attempt['state'] in {'held', 'cancelled'}:
+            return False
+        if run_id is not None:
+            action = conn.execute("SELECT deadline FROM review_actions WHERE task_id=? AND run_id=? AND state='running'", (task_id, run_id)).fetchone()
+            if not action or time.time() >= action['deadline']:
+                return False
     from hermes_cli.kanban_workflow_lessons import receive as receive_validation
     validation=receive_validation(conn,task_id,run_id,metadata.get('lesson_validation') if isinstance(metadata,dict) else None)
     if validation is not None:
@@ -283,7 +344,15 @@ def completion_allowed(conn, task_id, run_id=None, metadata=None):
     if lane is not None:
         return lane
     attempt = get_attempt(conn, task_id)
-    return attempt is None or attempt['state'] == 'approved'
+    if attempt is None:
+        return True
+    if attempt['state'] != 'approved':
+        return False
+    from hermes_cli.kanban_review_guards import snapshot_matches
+    if not snapshot_matches(conn, attempt):
+        hold(conn, attempt, 'approved_snapshot_changed')
+        return False
+    return True
 
 
 def redact_completion(conn, task_id, summary, result, metadata):
@@ -292,7 +361,22 @@ def redact_completion(conn, task_id, summary, result, metadata):
         return summary,result,metadata
     from hermes_cli.kanban_db import redact_review_value
     try:
-        return tuple(redact_review_value(v) for v in (summary,result,metadata))
+        values = (summary, result, metadata)
+        if len(json.dumps(values).encode()) > 32768:
+            return None, None, {}
+        return tuple(redact_review_value(v) for v in values)
     except Exception:
         # Redaction unavailable: no prose/paths/arguments survive into persistence.
         return None,None,{}
+
+
+def redact_event(conn, task_id, payload):
+    _, _, safe = redact_completion(conn, task_id, None, None, payload)
+    if not safe and isinstance(payload, dict):
+        # Keep only schema enums needed for classification/cascade correlation
+        # when arbitrary evidence cannot safely enter storage.
+        enums = {'trigger_outcome': {'crashed', 'timed_out', 'spawn_failed'},
+                 'kind': {'dependency', 'needs_input', 'capability', 'transient'}}
+        safe = {key: payload[key] for key, allowed in enums.items()
+                if isinstance(payload.get(key), str) and payload[key] in allowed}
+    return safe

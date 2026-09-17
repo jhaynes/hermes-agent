@@ -84,7 +84,9 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
     assert final['completed_rounds'] == 3
     assert final['state'] == ('held' if scope_changes else 'approved')
     assert cohort.start_cohort(conn, owner, lanes=lanes, expected_version=final['version']) is None
-    assert kb.complete_task(conn, owner, force=True) is (not scope_changes)
+    # These synthetic SHAs exercise cohort aggregation, not a real Git target.
+    # Actual positive owner completion is covered by test_kanban_review_snapshot.
+    assert not kb.complete_task(conn, owner, force=True)
     conn.close()
 
 

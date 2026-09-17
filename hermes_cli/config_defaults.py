@@ -1755,6 +1755,9 @@ DEFAULT_CONFIG = {
         # Null keeps diagnostics report-only until a constrained profile is staged
         # and explicitly selected by the operator. Does not disable managed gates.
         "review_feedback": {
+            # Intake is explicit operator enrollment, never automatic adoption.
+            "intake_enabled": True,
+            "rounds": 3, "recovery": 2, "active_seconds": 7200,
             "postmortem_profile": None, "validator_profile": None,
             "auto_apply_lessons": False, "protected_skill_hash": None,
         },

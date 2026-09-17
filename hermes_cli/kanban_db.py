@@ -1905,6 +1905,8 @@ def _append_event(
     run_id: Optional[int] = None,
 ) -> None:
     """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
+    from hermes_cli.kanban_review_state import redact_event
+    payload = redact_event(conn, task_id, payload)
     now = int(time.time())
     cursor = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
@@ -1929,6 +1931,8 @@ def _end_run(
     run_id = _current_run_id(conn, task_id)
     if run_id is None:
         return None
+    from hermes_cli.kanban_review_state import redact_completion
+    summary, error, metadata = redact_completion(conn, task_id, summary, error, metadata)
     conn.execute(
         """
         UPDATE task_runs

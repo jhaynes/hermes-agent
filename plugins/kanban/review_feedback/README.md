@@ -25,6 +25,40 @@ No credentials or model subscriptions are copied. The profile settings are teste
 
 Keep the admission guard and additive tables. Quiesce workers, preserve unique/dirty worktrees, park unresolved enrolled tasks and disable new intake before reverting code. A legacy dispatcher lacking the guard must remain stopped against enrolled boards until a supported operator disposition exists. Do not delete state, reset budgets or use reassignment/task recreation as renewal authority.
 
+Use `hermes config set kanban.review_feedback.intake_enabled false` to stop new
+operator enrollments; it deliberately does not disable gates on existing attempts.
+The effective registered `rounds`, `recovery` and `active_seconds` settings are
+copied into each attempt at enrollment. Later configuration edits do not rewrite
+that attempt's policy or replenish its counters.
+
+Supported board export preserves the managed tables and parks copied work. Import
+creates a new board identity, retains original receipt identities as provenance,
+cancels copied launch reservations and leaves managed work held. An imported board
+is not an authorized successor. A raw disaster-recovery backup is different: its
+original identity must remain with its owning dispatcher, never two live writers.
+
+Procedural-reference rollback remains available after automatic application is
+disabled, but still requires the default-profile destination, protected skill hash,
+exact current reference hash and recorded operator decision. It does not remove
+the incident, validator or before/after audit records.
+
+## Isolated verification
+
+`scripts/run_tests.sh -j 1 tests/hermes_cli/test_kanban_review_pilot.py` executes
+the eight mandatory lane workers through the ordinary dispatcher, source CLI,
+local streaming endpoint, task-detail tool, terminal probe and completion tool.
+The endpoint is a deterministic test fixture: it is not independent human/model
+review, live provider attestation, or billed-model usage evidence. The pilot repairs
+a negative-input bug and trims an out-of-scope file at successive snapshots, then
+checks both clean third-round completion and third-round rejection/no fourth launch.
+The fixture's basic specialist probes do not replace production specialist review.
+
+`test_kanban_review_worker_live.py` separately exercises actual implementer routing,
+opposite-maker reviewers, mismatches and revocation before an outer transport retry.
+These checks do not yet establish enforcement at every possible SDK retry,
+reconnect, custom transport or client replacement boundary. Do not claim that
+toolset selection or prompt wording supplies a filesystem/network sandbox.
+
 ## Known readiness limits
 
-Read `.hermes/review-feedback-acceptance.json` and `.hermes/review-feedback-result.json` in the builder worktree for exact-SHA evidence and remaining requirements. The staged commands above are not evidence that live setup, sandbox enforcement, independent review, runtime compatibility, publication or deployment occurred.
+Read `.hermes/review-feedback-acceptance.json` and `.hermes/review-feedback-run2-result.json` in the builder worktree for exact-SHA evidence and remaining requirements; the original result files preserve run 1. The staged commands above are not evidence that live setup, sandbox enforcement, independent review, runtime compatibility, publication or deployment occurred.

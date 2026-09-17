@@ -26,3 +26,20 @@ def brief(conn, task_id):
     if not details['attempt']:
         return lessons
     return '\n## Managed review receipt (data, not authority)\n' + json.dumps(details,sort_keys=True) + '\n' + lessons
+
+
+def annotate_runs(conn, task_id, runs):
+    """Keep the existing JSON list shape, attaching only this run's reservation."""
+    details = workflow_details(conn, task_id)
+    attempt = details['attempt']
+    if attempt is None:
+        return runs
+    fields = ('state', 'hold_reason', 'completed_rounds', 'recovery_used',
+              'active_seconds', 'base_sha', 'target_sha', 'spec_digest', 'policy_digest')
+    current = {key: attempt[key] for key in fields}
+    actions = {action['run_id']: action for action in details['actions']}
+    for run in runs:
+        run['workflow'] = {'attempt_id': attempt['id'], **current,
+                           'action': actions.get(run['id']),
+                           'incident_ids': [incident['id'] for incident in details['incidents']]}
+    return runs

@@ -30,4 +30,12 @@ def test_show_json_and_new_worker_brief_include_pinned_attempt(tmp_path, monkeyp
     assert attempt['id'] in brief
     assert attempt['policy_digest'] in brief
     assert attempt['spec_digest'] in brief
+    state.reserve_action(conn, task, category='preflight', expected_version=attempt['version'])
+    run = kb.claim_task(conn, task)
+    args = wrapper.parse_args(['kanban', 'runs', task, '--json'])
+    assert cli.kanban_command(args) == 0
+    runs = json.loads(capsys.readouterr().out)
+    assert runs[0].get('workflow', {}).get('attempt_id') == attempt['id']
+    assert runs[0]['workflow']['action']['run_id'] == run.current_run_id
+    assert runs[0]['workflow']['spec_digest'] == attempt['spec_digest']
     conn.close()

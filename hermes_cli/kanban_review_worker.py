@@ -21,14 +21,18 @@ def before_model_request(agent, request):
     from hermes_cli.kanban_review_cohort import record_runtime_route
     with connect_closing(Path(db_path)) as conn:
         member = conn.execute('SELECT * FROM review_members WHERE task_id=?', (task_id,)).fetchone()
-        if not member:
-            return
         attempt = state.get_attempt(conn, task_id)
+        if attempt is None:
+            return
+        from hermes_cli.kanban_review_guards import identity_valid
+        if not identity_valid(conn, attempt):
+            raise PermissionError('managed workflow identity or schema changed before request')
         task = conn.execute('SELECT * FROM tasks WHERE id=?', (task_id,)).fetchone()
         run_id = os.environ.get('HERMES_KANBAN_RUN_ID', '')
         if not run_id.isdecimal() or task['current_run_id'] != int(run_id):
             raise InterruptedError('managed review run is no longer current')
-        if attempt['state'] != 'reviewing' or getattr(agent, 'is_subagent', False):
+        phases = {'reviewing'} if member else {'preflight', 'repair'}
+        if attempt['state'] not in phases or getattr(agent, 'is_subagent', False):
             raise PermissionError('managed review is not admitted; nested review is prohibited')
         if getattr(agent, '_fallback_chain', None):
             raise PermissionError('enrolled review requires a pinned route without unverified fallback')
@@ -38,8 +42,12 @@ def before_model_request(agent, request):
         if not action or time.time() >= action['deadline']:
             raise TimeoutError('managed review execution deadline reached')
         model = request.get('model')
-        if agent.provider != task['provider_override'] or model != task['model_override']:
+        if ((task['provider_override'] and agent.provider != task['provider_override'])
+                or (task['model_override'] and model != task['model_override'])):
             raise PermissionError('effective model route differs from the reserved reviewer route')
+        if not member:
+            record_runtime_route(conn, task_id, int(run_id), provider=agent.provider, model=model, isolated=False)
+            return
         workspace = Path(task['workspace_path']).resolve()
         owner_path = conn.execute('SELECT workspace_path FROM tasks WHERE id=?', (attempt['task_id'],)).fetchone()[0]
         def git(*args):

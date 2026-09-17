@@ -1161,7 +1161,9 @@ def _cmd_runs(args: argparse.Namespace) -> int:
         return rc
     with kbc.connect_closing() as conn:
         runs = kb.list_runs(conn, args.task_id, **rsk)
-    if _json_out(args, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs]):
+        from hermes_cli.kanban_review_output import annotate_runs
+        payload = annotate_runs(conn, args.task_id, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs])
+    if _json_out(args, payload):
         return 0
     if not runs:
         print(f"(no runs yet for {args.task_id})")

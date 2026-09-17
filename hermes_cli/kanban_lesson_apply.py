@@ -21,12 +21,14 @@ def digest(data):
     return hashlib.sha256(data).hexdigest()
 
 
-def _paths():
+def _paths(*, rollback=False):
     from hermes_constants import get_default_hermes_root, get_hermes_home
     from hermes_cli.config import load_config
     config=load_config().get('kanban',{}).get('review_feedback',{})
     root=get_default_hermes_root()
-    if get_hermes_home().resolve()!=root.resolve() or not config.get('auto_apply_lessons',False):
+    if get_hermes_home().resolve()!=root.resolve():
+        return None
+    if not rollback and not config.get('auto_apply_lessons',False):
         return None
     skill=root/'skills/software-development/development-lifecycle/SKILL.md'
     reference=skill.parent/'references/verified-procedures.jsonl'
@@ -123,7 +125,7 @@ def apply_next(conn, *, expected_hash=None):
 def rollback(conn, lesson_id, *, expected_hash, decision):
     if os.environ.get('HERMES_KANBAN_TASK') or not isinstance(decision,str) or not decision.strip():
         raise PermissionError('rollback requires a recorded operator decision')
-    reference=_paths()
+    reference=_paths(rollback=True)
     if reference is None:
         return False
     with reference.with_suffix('.lock').open('a+b') as lock:
