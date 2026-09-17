@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import math
 import time
 
@@ -13,11 +14,24 @@ def initialize(conn):
         incident_id TEXT PRIMARY KEY, task_id TEXT NOT NULL UNIQUE,
         runs_started INTEGER NOT NULL DEFAULT 0, active_seconds REAL NOT NULL DEFAULT 0,
         started_monotonic REAL, boot_id TEXT, run_id INTEGER)''')
+    conn.execute('''CREATE TABLE IF NOT EXISTS workflow_report_artifacts (
+        incident_id TEXT PRIMARY KEY, attachment_id INTEGER NOT NULL, digest TEXT NOT NULL)''')
 
 
 def queue_reports(conn):
     from hermes_cli.config import load_config
     from hermes_cli import kanban_db as kb
+    publish_reports(conn)
+    from hermes_cli.kanban_lesson_apply import apply_next
+    try:
+        apply_next(conn)
+    except (OSError,ValueError):
+        # A stale/reference I/O failure is a learning hold, not permission to
+        # stop supervising implementation deadlines or replay unsafe content.
+        with write_txn(conn):
+            conn.execute("UPDATE workflow_lessons SET status='pending_approval' WHERE status='validated'")
+            conn.execute("UPDATE workflow_lesson_updates SET status='pending_approval' WHERE status='applying'")
+            conn.execute("UPDATE workflow_incidents SET lesson_status='pending_approval' WHERE id IN (SELECT incident_id FROM workflow_lessons WHERE status='pending_approval')")
     config = load_config().get('kanban', {}).get('review_feedback', {})
     profile = config.get('postmortem_profile')
     if not profile:
@@ -80,4 +94,60 @@ def released(conn, task_id, run_id, outcome):
 
 
 def is_diagnostic(conn, task_id):
-    return conn.execute('SELECT 1 FROM workflow_postmortems WHERE task_id=?', (task_id,)).fetchone() is not None
+    from hermes_cli.kanban_workflow_lessons import is_validator
+    return (conn.execute('SELECT 1 FROM workflow_postmortems WHERE task_id=?', (task_id,)).fetchone() is not None
+            or is_validator(conn,task_id))
+
+
+def receive(conn, task_id, run_id, report):
+    job=conn.execute('SELECT * FROM workflow_postmortems WHERE task_id=?',(task_id,)).fetchone()
+    if not job:
+        return None
+    if run_id is None or job['run_id']!=run_id or not isinstance(report,dict):
+        return False
+    incident=conn.execute('SELECT * FROM workflow_incidents WHERE id=?',(job['incident_id'],)).fetchone()
+    if incident['report_status']=='complete':
+        return False
+    fields={'incident_id','citations','facts','hypotheses','confidence','contributing_conditions',
+            'missed_gates','recovery_recommendation','proposed_change','validation_needed','owner'}
+    if set(report)!=fields or report['incident_id']!=incident['id'] or report['owner']!=incident['task_id']:
+        return False
+    citations=report['citations']
+    if not isinstance(citations,list) or not citations or not all(type(c) is int for c in citations):
+        return False
+    if not set(citations)<=set(json.loads(incident['source_events'])):
+        return False
+    if any(not isinstance(report[k],list) for k in ('facts','hypotheses','contributing_conditions','missed_gates','validation_needed')):
+        return False
+    if report['confidence'] not in {'unknown','low','medium','high'} or not report['validation_needed']:
+        return False
+    change=report['proposed_change']
+    from hermes_cli.kanban_workflow_lessons import admissible, propose
+    if change is not None and not admissible(change) and (not isinstance(change,dict) or change.get('approval_required') is not True):
+        return False
+    encoded=json.dumps(report,sort_keys=True)
+    if len(encoded.encode())>32768:
+        return False
+    conn.execute("UPDATE workflow_incidents SET report=?,report_status='complete' WHERE id=?", (encoded,incident['id']))
+    if change is not None:
+        propose(conn,incident,task_id,change)
+    return True
+
+
+def publish_reports(conn):
+    """Transactional outbox; a restart recovers a stored blob before making another."""
+    from hermes_cli import kanban_db as kb
+    with write_txn(conn):
+        rows=conn.execute('''SELECT * FROM workflow_incidents i WHERE report_status='complete'
+            AND classification='failure' AND NOT EXISTS(
+            SELECT 1 FROM workflow_report_artifacts a WHERE a.incident_id=i.id) LIMIT 16''').fetchall()
+        for incident in rows:
+            data=incident['report'].encode()
+            digest=hashlib.sha256(data).hexdigest()
+            filename=f'postmortem-{digest}.json'
+            existing=conn.execute('SELECT id FROM task_attachments WHERE task_id=? AND filename=? AND uploaded_by=?',
+                                  (incident['task_id'],filename,'workflow')).fetchone()
+            attachment=existing[0] if existing else kb.store_attachment_bytes(conn,incident['task_id'],filename,data,content_type='application/json',uploaded_by='workflow')
+            conn.execute('INSERT INTO workflow_report_artifacts VALUES(?,?,?)',(incident['id'],attachment,digest))
+            kb._insert_comment(conn,incident['task_id'],'workflow',
+                               f"Postmortem {incident['id']} attached ({digest}); incident remains {incident['state']}.",int(time.time()))

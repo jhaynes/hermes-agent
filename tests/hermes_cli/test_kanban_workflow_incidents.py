@@ -57,4 +57,8 @@ def test_dispatch_reconciles_missed_capture_once_and_links_recurrence(tmp_path, 
     second = dict(conn.execute('SELECT * FROM workflow_incidents ORDER BY rowid DESC LIMIT 1').fetchone())
     assert second['id'] != first['id']
     assert second['prior_incident_id'] == first['id']
+    dispatch._record_task_failure(conn,task,'synthetic crash',outcome='crashed',failure_limit=100,
+                                  release_claim=True,end_run=True)
+    dispatch._record_task_failure(conn,task,'synthetic crash',outcome='crashed',force_trip=True)
+    assert conn.execute('SELECT COUNT(*) FROM workflow_incidents').fetchone()[0]==2, 'Native runless gave_up must retain the preceding crash episode'
     conn.close()

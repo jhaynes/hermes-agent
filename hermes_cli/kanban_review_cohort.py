@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import uuid
 from pathlib import Path
 
@@ -63,7 +64,9 @@ def start_cohort(conn, task_id, *, lanes, expected_version, recovery=False):
             child = kb.create_task(conn, title=f'Bounded review: {mandate}',
                 body=json.dumps({'attempt_id':attempt['id'],'round_id':round_id,'mandate':mandate,
                                  'base_sha':attempt['base_sha'],'target_sha':attempt['target_sha'],
-                                 'spec_digest':attempt['spec_digest'],'policy_digest':attempt['policy_digest']}),
+                                 'spec_digest':attempt['spec_digest'],'policy_digest':attempt['policy_digest'],
+                                 'owner_task_id':task_id,'evidence_is_data':True,
+                                 'prior_findings':prior_findings(conn,attempt['id'],mandate)}),
                 assignee=lane['profile'], workspace_kind='dir', workspace_path=lane['workspace'],
                 model_override=lane['model'], provider_override=lane['provider'],
                 max_runtime_seconds=attempt['policy']['active_seconds'], goal_mode=False)
@@ -99,6 +102,16 @@ def record_runtime_route(conn, task_id, run_id, *, provider, model, isolated):
                      (run_id,provider,model,maker,int(isolated),task_id))
 
 
+def prior_findings(conn, attempt_id, mandate):
+    rows=conn.execute('''SELECT m.receipt FROM review_members m JOIN review_rounds r ON r.id=m.round_id
+        WHERE m.attempt_id=? AND m.mandate=? AND r.state='valid_changes' ORDER BY r.ordinal''',(attempt_id,mandate)).fetchall()
+    findings={}
+    for row in rows:
+        for finding in json.loads(row['receipt'])['findings']:
+            findings[finding['finding_id']]=finding
+    return list(findings.values())
+
+
 def receive(conn, task_id, run_id, receipt):
     """Inside complete_task's transaction. False means no lane completion authority."""
     from hermes_cli import kanban_review_state as state
@@ -122,10 +135,21 @@ def receive(conn, task_id, run_id, receipt):
                  and not (receipt['verdict']=='approve' and findings)
                  and all(isinstance(f,dict) and all(f.get(k) for k in ('severity','evidence','required_change')) for f in findings)
                  and len(json.dumps(receipt)) <= 32768)
+    if valid:
+        previous={f['finding_id'] for f in prior_findings(conn,attempt['id'],member['mandate'])}
+        closures=receipt['prior_findings']
+        valid=(all(isinstance(c,dict) and c.get('finding_id') in previous
+                   and c.get('status') in {'open','closed'} and c.get('evidence') for c in closures)
+               and {c['finding_id'] for c in closures}==previous)
+        if valid and receipt['verdict']=='approve':
+            valid=all(c['status']=='closed' for c in closures)
     safe = None
     if valid:
         try:
             safe = kb.redact_review_value(receipt)
+            for finding in safe['findings']:
+                finding.pop('finding_id',None)
+                finding['finding_id']=hashlib.sha256(json.dumps(finding,sort_keys=True).encode()).hexdigest()
         except Exception:
             valid = False
     terminal = 'received_valid' if valid else 'invalid'
@@ -135,6 +159,24 @@ def receive(conn, task_id, run_id, receipt):
         kb._append_event(conn, attempt['task_id'], 'review_invalid', {'round_id':member['round_id']}, run_id=run_id)
     aggregate(conn, attempt, member['round_id'])
     return True
+
+
+def released(conn, task_id, run_id, outcome):
+    member=conn.execute('SELECT * FROM review_members WHERE task_id=?',(task_id,)).fetchone()
+    if not member:
+        return
+    if outcome!='completed':
+        conn.execute("UPDATE review_members SET state='failed' WHERE task_id=? AND state NOT IN ('received_valid','invalid')",(task_id,))
+    elif member['state']!='invalid':
+        return
+    conn.execute("UPDATE review_rounds SET state='invalid' WHERE id=? AND state='running'",(member['round_id'],))
+    # A failed lane cannot leave seven native launch retries outstanding. Already
+    # running lanes may finish; their receipts are history, never a mixed approval.
+    conn.execute("""UPDATE review_actions SET state='cancelled' WHERE state='reserved'
+        AND task_id IN (SELECT task_id FROM review_members WHERE round_id=?)""",(member['round_id'],))
+    from hermes_cli import kanban_db as kb
+    owner=conn.execute('SELECT task_id FROM review_attempts WHERE id=?',(member['attempt_id'],)).fetchone()[0]
+    kb._append_event(conn,owner,'review_invalid',{'round_id':member['round_id']},run_id=run_id)
 
 
 def aggregate(conn, attempt, round_id):
@@ -152,3 +194,11 @@ def aggregate(conn, attempt, round_id):
     conn.execute('UPDATE review_attempts SET completed_rounds=?,state=?,version=version+1 WHERE id=?', (completed,phase,attempt['id']))
     if not clean and completed >= attempt['policy']['rounds']:
         state.hold(conn, attempt, 'review_exhausted')
+    elif not clean:
+        from hermes_cli import kanban_db as kb
+        requested = kb._latest_event(conn, attempt['task_id'], 'review_requested')
+        implementer = kb._json_dict(requested['payload']).get('implementer') if requested else None
+        if not implementer:
+            state.hold(conn, attempt, 'implementer_identity_missing')
+            return
+        conn.execute("UPDATE tasks SET status='ready',assignee=? WHERE id=?", (implementer,attempt['task_id']))

@@ -1846,7 +1846,7 @@ def add_attachment(
     if not stored_path or not stored_path.strip():
         raise ValueError("attachment stored_path is required")
     now = int(time.time())
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         _require_task(conn, task_id)
         cur = conn.execute(
             "INSERT INTO task_attachments "
@@ -1946,7 +1946,7 @@ def _end_run(
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
     from hermes_cli.kanban_review_state import released
-    released(conn, task_id, run_id, outcome)
+    released(conn, task_id, run_id, outcome, metadata)
     return run_id
 
 
@@ -2686,6 +2686,8 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
+    from hermes_cli.kanban_review_state import redact_completion
+    summary, result, metadata = redact_completion(conn, task_id, summary, result, metadata)
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     metadata = _merge_completion_prose_artifacts(
         conn, task_id, metadata, summary=summary, result=result,
@@ -3203,6 +3205,9 @@ def request_review(
     staged_copies: list[Path] = []
     try:
         with write_txn(conn):
+            from hermes_cli.kanban_review_state import handoff_allowed
+            if not handoff_allowed(conn, task_id, expected_run_id, metadata):
+                return _ret(False, 'managed review requires a current preflight/repair receipt')
             if not _parents_satisfied(conn, task_id):
                 return _ret(False, "parent dependencies are not satisfied")
             trow = conn.execute(
@@ -3803,6 +3808,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
+    from hermes_cli.kanban_review_output import brief
+    managed_brief = brief(conn, task_id)
+    if managed_brief:
+        lines.append(managed_brief)
     return "\n".join(lines).rstrip() + "\n"
 
 

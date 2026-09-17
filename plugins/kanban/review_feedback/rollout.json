@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "activation": "held_pending_independent_review_and_runtime_compatibility",
+  "profiles": [
+    {"name": "reviewbreakera", "mandate": "breaker_a", "description": "Review malformed and boundary inputs, error paths and violated assumptions. Produce executed reproducers or explicitly label unexecuted reasoning."},
+    {"name": "reviewbreakerb", "mandate": "breaker_b", "description": "Review timing, concurrency, cancellation and resource exhaustion. Explain genuine non-applicability; do not invent architecture or findings."},
+    {"name": "reviewbreakerc", "mandate": "breaker_c", "description": "Review lifecycle transitions, retries, rollback and integration regressions. Re-attack prior findings against the pinned snapshot."},
+    {"name": "reviewscope", "mandate": "scope", "description": "Blocking review mapping the entire diff to the original approved ask, amendments and acceptance evidence. Flag missing evidence and unrelated behavior; necessary scoped safety fixes remain in scope."}
+  ],
+  "creation_options": {"no_alias": true, "no_skills": true, "clone_config": false, "clone_all": false},
+  "settings": {
+    "agent.max_turns": 32,
+    "platform_toolsets.cli": ["file", "terminal", "kanban"],
+    "agent.disabled_toolsets": ["delegation", "skills"],
+    "memory.memory_enabled": false,
+    "memory.user_profile_enabled": false
+  },
+  "routing": {"explicit_per_card_model": true, "explicit_per_card_provider": true, "opposite_implementer_maker": true, "fallback": "refuse_unverified", "capacity": "preserve_existing"},
+  "capability_limit": "Toolset selection and prompts are not an OS sandbox. These profiles are staged only for isolated synthetic review workspaces; live mutation/network probes remain unverified until execution restrictions are proven.",
+  "learning": {"initial_mode": "report_only", "reference": "software-development/development-lifecycle/references/verified-procedures.jsonl", "protected_skill": "software-development/development-lifecycle/SKILL.md"}
+}

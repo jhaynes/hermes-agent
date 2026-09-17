@@ -6,8 +6,8 @@ from hermes_cli import kanban_review_state as state
 from hermes_cli.kanban_db_connect import connect
 
 
-@pytest.mark.parametrize('scope_changes', [False, True])
-def test_third_cohort_requires_scope_and_never_grants_fourth_round(tmp_path, monkeypatch, scope_changes):
+@pytest.mark.parametrize('consumed,scope_changes', [(2,False), (2,True), (0,True)])
+def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypatch, consumed, scope_changes):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     conn = connect(tmp_path / 'board.db')
     owner = kb.create_task(conn, title='approved ask', assignee='builder', workspace_kind='dir', workspace_path=str(tmp_path))
@@ -15,7 +15,7 @@ def test_third_cohort_requires_scope_and_never_grants_fourth_round(tmp_path, mon
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
-        consumed={'rounds':2,'recovery':0,'active_seconds':0},
+        consumed={'rounds':consumed,'recovery':0,'active_seconds':0},
         compatibility={'cli':1,'gateway':1,'dashboard':1}, decision='conservative adoption')
     state.reserve_action(conn, owner, category='preflight', expected_version=0)
     run = kb.claim_task(conn, owner)
@@ -48,8 +48,73 @@ def test_third_cohort_requires_scope_and_never_grants_fourth_round(tmp_path, mon
         if card['mandate'] != 'scope':
             assert not kb.complete_task(conn, owner, force=True)
     final = state.get_attempt(conn, owner)
+    if consumed == 0:
+        assert final['completed_rounds'] == 1
+        assert final['state'] == 'repair'
+        state.reserve_action(conn, owner, category='repair', expected_version=final['version'])
+        repair = kb.claim_task(conn, owner)
+        assert repair is not None, 'Valid rejection must hand one repair back to the original builder'
+        assert repair.assignee == 'builder'
+        assert kb.request_review(conn, owner, expected_run_id=repair.current_run_id,
+                                 metadata={'bounded_review':{'target_sha':'d'*40}})
+        updated = state.get_attempt(conn, owner)
+        assert updated['state'] == 'preflight'
+        assert updated['target_sha'] == 'd'*40
+        assert updated['completed_rounds'] == 1
+        assert not kb.complete_task(conn, owner, force=True)
+        state.reserve_action(conn,owner,category='preflight',expected_version=updated['version'])
+        preflight=kb.claim_review_task(conn,owner)
+        assert preflight is not None
+        assert kb.request_review(conn,owner,expected_run_id=preflight.current_run_id)
+        updated=state.get_attempt(conn,owner)
+        next_round=cohort.start_cohort(conn,owner,lanes=lanes,expected_version=updated['version'])
+        scope=conn.execute("SELECT task_id FROM review_members WHERE round_id=? AND mandate='scope'",(next_round,)).fetchone()[0]
+        scope_run=kb.claim_task(conn,scope)
+        cohort.record_runtime_route(conn,scope,scope_run.current_run_id,provider='anthropic',model='claude-sonnet-4-5',isolated=True)
+        incomplete={**receipt,'round_id':next_round,'task_id':scope,'run_id':scope_run.current_run_id,
+                    'target_sha':'d'*40,'verdict':'approve','findings':[],'prior_findings':[]}
+        assert kb.complete_task(conn,scope,expected_run_id=scope_run.current_run_id,metadata={'bounded_review':incomplete})
+        assert conn.execute('SELECT state FROM review_members WHERE task_id=?',(scope,)).fetchone()[0]=='invalid', 'Prior accepted findings require explicit re-attack closure evidence'
+        conn.close()
+        return
     assert final['completed_rounds'] == 3
     assert final['state'] == ('held' if scope_changes else 'approved')
     assert cohort.start_cohort(conn, owner, lanes=lanes, expected_version=final['version']) is None
     assert kb.complete_task(conn, owner, force=True) is (not scope_changes)
+    conn.close()
+
+
+def test_failed_cohort_replacements_share_recovery_and_cancel_unlaunched_lanes(tmp_path, monkeypatch):
+    from hermes_cli import kanban_db_dispatch as dispatch
+    monkeypatch.delenv('HERMES_KANBAN_TASK',raising=False)
+    monkeypatch.setattr(dispatch,'_profile_exists_fn',lambda:lambda p:True)
+    conn=connect(tmp_path/'board.db')
+    owner=kb.create_task(conn,title='failed launches',assignee='builder',workspace_kind='dir',workspace_path=str(tmp_path))
+    attempt=state.enroll_review(conn,owner,expected_status='ready',expected_run_id=None,
+        board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
+        base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
+        consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility={'cli':1,'gateway':1,'dashboard':1},decision='synthetic')
+    state.reserve_action(conn,owner,category='preflight',expected_version=0)
+    run=kb.claim_task(conn,owner)
+    assert kb.request_review(conn,owner,expected_run_id=run.current_run_id)
+    from hermes_cli import kanban_review_cohort as cohort
+    lanes={name:{'profile':'reviewer','model':'claude-sonnet-4-5','provider':'anthropic','workspace':str(tmp_path/name)} for name in attempt['roster']}
+    launches=[]
+    def fail(task, workspace):
+        launches.append(task.id)
+        raise OSError('synthetic launch failure')
+    for retry in range(3):
+        current=state.get_attempt(conn,owner)
+        round_id=cohort.start_cohort(conn,owner,lanes=lanes,expected_version=current['version'],recovery=retry>0)
+        dispatch.dispatch_once(conn,spawn_fn=fail,max_spawn=1)
+        assert conn.execute('SELECT state FROM review_rounds WHERE id=?',(round_id,)).fetchone()[0]=='invalid'
+        assert conn.execute("SELECT COUNT(*) FROM review_actions WHERE attempt_id=? AND state='reserved'",(attempt['id'],)).fetchone()[0]==0
+        assert len(launches)==retry+1
+    current=state.get_attempt(conn,owner)
+    assert current['completed_rounds']==0
+    assert current['recovery_used']==2
+    assert cohort.start_cohort(conn,owner,lanes=lanes,expected_version=current['version'],recovery=True) is None
+    assert state.get_attempt(conn,owner)['state']=='held'
+    dispatch.dispatch_once(conn,spawn_fn=fail,max_spawn=1)
+    assert len(launches)==3
     conn.close()

@@ -215,6 +215,17 @@ _SPECS = [
         _arg("--idempotency-key", help="Dedup key for the root card"),
         _json_flag(help="Emit JSON output"),
     ], help="Create a Kanban Swarm v1 graph (parallel workers → verifier → synthesizer)"),
+    _cmd("enroll-review", [
+        _arg("task_id"), _arg("--receipt", required=True, help="Operator compatibility/history receipt JSON"),
+    ], help="Enroll a quiescent task in bounded review (operator only)"),
+    _cmd("reserve-review-action", [
+        _arg("task_id"), _arg("--category", required=True, choices=["preflight", "repair"]),
+        _arg("--expected-version", required=True, type=int), _arg("--recovery", action="store_true"),
+    ], help="Atomically reserve a managed preflight or repair action"),
+    _cmd("start-review-cohort", [
+        _arg("task_id"), _arg("--lanes", required=True, help="Pinned roster routing JSON"),
+        _arg("--expected-version", required=True, type=int), _arg("--recovery", action="store_true"),
+    ], help="Reserve the complete immutable review cohort"),
     _cmd("list", [
         _arg("--mine", action="store_true", help="Filter by $HERMES_PROFILE as assignee"),
         _arg("--assignee"),

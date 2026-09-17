@@ -1754,7 +1754,10 @@ DEFAULT_CONFIG = {
         "failure_limit": 2,
         # Null keeps diagnostics report-only until a constrained profile is staged
         # and explicitly selected by the operator. Does not disable managed gates.
-        "review_feedback": {"postmortem_profile": None},
+        "review_feedback": {
+            "postmortem_profile": None, "validator_profile": None,
+            "auto_apply_lessons": False, "protected_skill_hash": None,
+        },
         # Worker stdout/stderr log rotation at spawn time (2 MiB + one backup). Raise to keep more
         # early failure evidence from long-running workers.
         "worker_log_rotate_bytes": 2 * 1024 * 1024,

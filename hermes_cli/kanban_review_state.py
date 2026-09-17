@@ -145,7 +145,9 @@ def claimed(conn, task_id, run_id):
     conn.execute('UPDATE task_runs SET max_runtime_seconds=? WHERE id=?', (cap,run_id))
 
 
-def released(conn, task_id, run_id, outcome):
+def released(conn, task_id, run_id, outcome, metadata=None):
+    from hermes_cli.kanban_workflow_lessons import failed as validation_failed
+    validation_failed(conn,task_id,outcome)
     from hermes_cli.kanban_postmortem import released as diagnostic_released
     diagnostic_released(conn, task_id, run_id, outcome)
     attempt = get_attempt(conn, task_id)
@@ -153,6 +155,27 @@ def released(conn, task_id, run_id, outcome):
         settle_clock(conn, attempt)
     conn.execute("UPDATE review_actions SET state=? WHERE task_id=? AND run_id=? AND state='running'",
                  ('complete' if outcome in {'completed','review_requested'} else 'failed', task_id,run_id))
+    from hermes_cli.kanban_review_cohort import released as cohort_released
+    cohort_released(conn,task_id,run_id,outcome)
+    if attempt and task_id == attempt['task_id'] and attempt['state'] == 'repair' and outcome == 'review_requested':
+        conn.execute("UPDATE review_attempts SET state='preflight',target_sha=?,version=version+1 WHERE id=?",
+                     (metadata['bounded_review']['target_sha'],attempt['id']))
+
+
+def handoff_allowed(conn, task_id, run_id, metadata):
+    attempt = get_attempt(conn, task_id)
+    if attempt is None:
+        return True
+    if task_id != attempt['task_id'] or attempt['state'] not in {'preflight','repair'}:
+        return False
+    action = conn.execute("SELECT 1 FROM review_actions WHERE task_id=? AND run_id=? AND state='running'", (task_id,run_id)).fetchone()
+    if not action:
+        return False
+    if attempt['state'] == 'repair':
+        receipt = metadata.get('bounded_review', {}) if isinstance(metadata,dict) else {}
+        target = receipt.get('target_sha') if isinstance(receipt,dict) else None
+        return isinstance(target,str) and re.fullmatch('[0-9a-f]{40}',target) is not None
+    return True
 
 
 def settle_clock(conn, attempt):
@@ -245,9 +268,29 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
 
 
 def completion_allowed(conn, task_id, run_id=None, metadata=None):
+    from hermes_cli.kanban_workflow_lessons import receive as receive_validation
+    validation=receive_validation(conn,task_id,run_id,metadata.get('lesson_validation') if isinstance(metadata,dict) else None)
+    if validation is not None:
+        return validation
+    from hermes_cli.kanban_postmortem import receive as receive_postmortem
+    report=receive_postmortem(conn,task_id,run_id,metadata.get('postmortem') if isinstance(metadata,dict) else None)
+    if report is not None:
+        return report
     from hermes_cli.kanban_review_cohort import receive
     lane = receive(conn, task_id, run_id, metadata.get('bounded_review') if isinstance(metadata,dict) else None)
     if lane is not None:
         return lane
     attempt = get_attempt(conn, task_id)
     return attempt is None or attempt['state'] == 'approved'
+
+
+def redact_completion(conn, task_id, summary, result, metadata):
+    from hermes_cli.kanban_postmortem import is_diagnostic
+    if get_attempt(conn,task_id) is None and not is_diagnostic(conn,task_id):
+        return summary,result,metadata
+    from hermes_cli.kanban_db import redact_review_value
+    try:
+        return tuple(redact_review_value(v) for v in (summary,result,metadata))
+    except Exception:
+        # Redaction unavailable: no prose/paths/arguments survive into persistence.
+        return None,None,{}

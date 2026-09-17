@@ -38,6 +38,8 @@ def initialize(conn):
             source_events TEXT NOT NULL, report TEXT, created_at INTEGER NOT NULL)""")
         from hermes_cli.kanban_postmortem import initialize as initialize_postmortems
         initialize_postmortems(conn)
+        from hermes_cli.kanban_workflow_lessons import initialize as initialize_lessons
+        initialize_lessons(conn)
 
 
 def reconcile_events(conn, batch_size=256):
@@ -62,6 +64,12 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
     from hermes_cli.kanban_postmortem import is_diagnostic
     if is_diagnostic(conn, task_id):
         return
+    if kind=='gave_up' and run_id is None:
+        cause=conn.execute("""SELECT kind,run_id FROM task_events WHERE task_id=? AND id<?
+            AND kind IN ('claimed','crashed','timed_out','spawn_failed') ORDER BY id DESC LIMIT 1""",
+            (task_id,event_id)).fetchone()
+        if cause and cause['kind']==(payload or {}).get('trigger_outcome'):
+            run_id=cause['run_id']
     board = conn.execute("SELECT board_id FROM workflow_board WHERE singleton=1").fetchone()[0]
     # A terminal run's crash/gave_up/block cascade is one causal episode.
     # Runless transitions are independent unless replaying that exact event.
