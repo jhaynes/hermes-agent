@@ -6,6 +6,26 @@ import pytest
 
 
 @pytest.fixture
+def seed_review_worker_catalog():
+    """Supply synthetic catalog data so real CLI startup needs no public API."""
+    import json
+
+    def seed(profile):
+        cache = profile / "cache"
+        cache.mkdir()
+        (cache / "openrouter_model_metadata.json").write_text(json.dumps({
+            "anthropic/claude-sonnet-4-5": {
+                "name": "Synthetic fixture model",
+                "context_length": 200000,
+                "max_completion_tokens": 4096,
+                "pricing": {"prompt": "0.000001", "completion": "0.000001"},
+            },
+        }))
+
+    return seed
+
+
+@pytest.fixture
 def all_assignees_spawnable(monkeypatch):
     """Pretend every assignee maps to a real Hermes profile.
 

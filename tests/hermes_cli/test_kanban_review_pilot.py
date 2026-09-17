@@ -61,12 +61,13 @@ print('PILOT_RESULT=' + json.dumps({'mandate': mandate, 'findings': findings}))
 
 
 @pytest.mark.parametrize('clean_third', [True, False])
-def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypatch, clean_third, record_property):
+def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypatch, clean_third, record_property, seed_review_worker_catalog):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     monkeypatch.setenv('HOME', str(tmp_path))
     home = tmp_path / '.hermes'
     profile = home / 'profiles' / 'reviewer'
     profile.mkdir(parents=True)
+    seed_review_worker_catalog(profile)
     monkeypatch.setenv('HERMES_HOME', str(home))
     db = home / 'kanban.db'
     monkeypatch.setenv('HERMES_KANBAN_DB', str(db))
@@ -186,7 +187,7 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
         base_sha=base, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
         consumed={'rounds': 0, 'recovery': 0, 'active_seconds': 0},
         compatibility={'cli': 1, 'gateway': 1, 'dashboard': 1}, decision='synthetic pilot')
-    monkeypatch.setattr(dispatch, '_resolve_hermes_argv', lambda: [sys.executable, str(root / 'hermes')])
+    monkeypatch.setattr(dispatch, '_resolve_hermes_argv', lambda: [sys.executable, str(root / 'tests/hermes_cli/kanban_worker_probe.py'), str(root)])
     monkeypatch.setattr(dispatch, '_profile_exists_fn', lambda: lambda p: p == 'reviewer')
     try:
         for ordinal in range(1, 4):

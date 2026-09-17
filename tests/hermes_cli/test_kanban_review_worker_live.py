@@ -21,13 +21,14 @@ from hermes_cli.kanban_db_connect import connect
     ('openai','identity','review'),
     ('anthropic',False,'preflight'), ('openai',False,'preflight'),
 ])
-def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, implementer, revoke, phase):
+def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, implementer, revoke, phase, seed_review_worker_catalog):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     monkeypatch.setenv('HOME', str(tmp_path))
     root = Path(__file__).resolve().parents[2]
     home = tmp_path / '.hermes'
     profile = home / 'profiles' / 'reviewer'
     profile.mkdir(parents=True)
+    seed_review_worker_catalog(profile)
     monkeypatch.setenv('HERMES_HOME', str(home))
     db = home / 'kanban.db'
     monkeypatch.setenv('HERMES_KANBAN_DB', str(db))
@@ -93,7 +94,7 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
         lanes[name]={'profile':'reviewer','model':'anthropic/claude-sonnet-4-5','provider':'openrouter','workspace':str(path)}
     if phase == 'review':
         cohort.start_cohort(conn,owner,lanes=lanes,expected_version=1)
-    monkeypatch.setattr(dispatch,'_resolve_hermes_argv',lambda:[sys.executable,str(root/'hermes')])
+    monkeypatch.setattr(dispatch,'_resolve_hermes_argv',lambda:[sys.executable,str(root/'tests/hermes_cli/kanban_worker_probe.py'),str(root)])
     monkeypatch.setattr(dispatch,'_resolve_worker_cli_toolsets',lambda _:['kanban'])
     monkeypatch.setattr(dispatch,'_profile_exists_fn',lambda:lambda p:p=='reviewer')
     try:
@@ -121,7 +122,8 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
             log=(kb.worker_logs_dir()/f'{task_id}.log').read_text()
             assert ('unverified or non-independent reviewer route' if phase=='review' else 'implementer route differs') in log
         else:
-            assert calls, 'Real CLI worker did not reach the local endpoint'
+            assert calls, ('Real CLI worker did not reach the local endpoint',
+                           (kb.worker_logs_dir()/f'{task_id}.log').read_text())
             assert route is not None, 'Actual implementer routing must be recorded, not just declared at enrollment'
             assert route['maker']=='anthropic', 'Actual worker construction must persist resolved maker before provider request'
             assert route['run_id']==kb.get_task(conn,task_id).current_run_id
