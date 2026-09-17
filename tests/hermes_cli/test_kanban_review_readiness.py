@@ -97,6 +97,7 @@ def test_readiness_refuses_before_enrollment_mutation(tmp_path, monkeypatch, fau
 
 
 def test_changed_runtime_cannot_claim_managed_work(tmp_path, monkeypatch):
+    import sqlite3
     from hermes_cli import kanban_review_readiness as readiness
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     with connect(tmp_path/'board.db') as conn:
@@ -106,6 +107,11 @@ def test_changed_runtime_cannot_claim_managed_work(tmp_path, monkeypatch):
         monkeypatch.setattr(readiness, 'runtime_digest', lambda:'different-loaded-runtime')
         assert kb.claim_task(conn, task) is None
         assert state.get_attempt(conn, task)['state'] == 'held'
+        with pytest.raises(sqlite3.DatabaseError, match='mixed-version'):
+            kb.assign_task(conn, task, 'different-owner')
+        assert kb.get_task(conn, task).assignee == 'builder'
+        with pytest.raises(sqlite3.DatabaseError, match='mixed-version'):
+            conn.execute('UPDATE tasks SET block_kind=NULL WHERE id=?',(task,))
 
 
 def test_successor_requires_current_writer_readiness(tmp_path, monkeypatch):

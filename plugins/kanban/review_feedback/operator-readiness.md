@@ -44,7 +44,9 @@ attestation or a sandbox against code executing as the same account owner.
 The digest covers loaded managed-workflow functions and shared lifecycle entry
 points, not merely a checkout SHA, package version string, or file on disk. A
 process whose workflow implementation/ABI differs from an enrolled attempt may
-not launch its work. A runtime upgrade therefore requires deliberate forward
+not launch its work or mutate its task fields. The persistent writer guard allows
+only parking otherwise unchanged work in `blocked`/`needs_input`; reassignment,
+workspace/budget changes and clearing that hold are refused. A runtime upgrade therefore requires deliberate forward
 compatibility/disposition, not a silent replacement. Unknown older receipt shapes
 remain held; there is no automatic compatibility waiver. If a service cannot
 answer, leave migration held and present its actual upgrade/restart choice.

@@ -3,6 +3,19 @@ from __future__ import annotations
 
 
 def install(conn):
+    # An incompatible writer may only park unchanged work in a safe hold.
+    # Include every task field so assignment/workspace/budget edits cannot route
+    # around the status admission guard. Schema names come from our own table.
+    columns = [row[1] for row in conn.execute('PRAGMA table_info(tasks)')
+               if row[1] not in {'status','block_kind'}]
+    unchanged = ' AND '.join(f'OLD."{name}" IS NEW."{name}"' for name in columns)
+    conn.execute(f'''CREATE TRIGGER IF NOT EXISTS review_writer_guard
+        BEFORE UPDATE ON tasks
+        WHEN EXISTS(SELECT 1 FROM review_attempts WHERE task_id=OLD.id)
+          OR EXISTS(SELECT 1 FROM review_members WHERE task_id=OLD.id)
+        BEGIN SELECT CASE WHEN workflow_writer_compatible(OLD.id)=0
+          AND NOT (NEW.status IS 'blocked' AND NEW.block_kind IS 'needs_input' AND {unchanged})
+          THEN RAISE(ABORT, 'mixed-version managed workflow writer refused') END; END''')
     conn.execute('''CREATE TRIGGER IF NOT EXISTS review_frozen_task
         BEFORE UPDATE OF title,body,model_override,provider_override ON tasks
         WHEN (EXISTS(SELECT 1 FROM review_attempts WHERE task_id=OLD.id)

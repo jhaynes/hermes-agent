@@ -65,6 +65,9 @@ def bind_connection(conn):
     # This is a downgrade guard, not a sandbox against arbitrary SQL by the owner.
     conn.create_function('workflow_transition_allowed', 2,
                          lambda task_id, status: transition_allowed(conn, task_id, status))
+    from hermes_cli.kanban_review_readiness import compatible
+    conn.create_function('workflow_writer_compatible', 1,
+                         lambda task_id: compatible(get_attempt(conn,task_id)))
 
 
 def transition_allowed(conn, task_id, status):
