@@ -5,6 +5,13 @@ from __future__ import annotations
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _isolate_worker_launch_handles(monkeypatch):
+    """A preceding spawn test's fake Popen must not become this test's child."""
+    from hermes_cli import kanban_worker_launch
+    monkeypatch.setattr(kanban_worker_launch, '_children', {})
+
+
 @pytest.fixture
 def seed_review_worker_catalog():
     """Supply synthetic catalog data so real CLI startup needs no public API."""
