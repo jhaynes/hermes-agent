@@ -5,6 +5,7 @@ import pytest
 
 from hermes_cli import kanban_db as kb
 from tests.hermes_cli.review_readiness_helpers import writer_receipts
+from tests.hermes_cli.review_evidence_helpers import scope_evidence
 from hermes_cli import kanban_review_state as state
 from hermes_cli import kanban_review_cohort as cohort
 from hermes_cli.kanban_db_connect import connect
@@ -46,7 +47,7 @@ def test_completion_checks_actual_approved_snapshot(tmp_path, monkeypatch, mutat
             receipt = {key: attempt[key] for key in ('board_id', 'base_sha', 'target_sha', 'policy_digest', 'spec_digest')}
             receipt.update(attempt_id=attempt['id'], round_id=member['round_id'], mandate=member['mandate'],
                            task_id=task, run_id=run.current_run_id, verdict='approve', findings=[],
-                           verification_run=[{'kind':'reasoned','reasoning':'synthetic completion-gate unit test'}], prior_findings=[])
+                           verification_run=[{'kind':'reasoned','reasoning':'synthetic completion-gate unit test'}], prior_findings=[], scope=scope_evidence())
             assert kb.complete_task(conn, task, expected_run_id=run.current_run_id, metadata={'bounded_review': receipt})
         assert state.get_attempt(conn, owner)['state'] == 'approved'
         if mutation != 'none':

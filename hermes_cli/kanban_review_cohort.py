@@ -96,6 +96,7 @@ def start_cohort(conn, task_id, *, lanes, expected_version, recovery=False):
                                      'location':{'path':'repository-relative path','line':'positive integer'},
                                      'verification_run':'Nonempty list of typed evidence objects.',
                                      'prior_findings':'One finding_id/status/evidence entry per prior finding; rejected requires parent disposition.',
+                                     'scope':'Scope lane must supply mapping (requirement/change/typed evidence), missing_evidence and extraneous lists, and safety_dispositions (change/requirement/rationale/disposition/follow_up). Necessary safety stays tied to the ask; out_of_scope needs an explicit follow-up. Approval cannot leave missing evidence or extraneous changes.',
                                  },
                                  'prior_findings':prior_findings(conn,attempt['id'],mandate)}),
                 assignee=lane['profile'], workspace_kind='dir', workspace_path=lane['workspace'],

@@ -22,7 +22,7 @@ from hermes_cli import kanban_review_cohort as cohort
 from hermes_cli.kanban_db_connect import connect, connect_closing
 
 
-PROBE = '''import importlib.util, json, pathlib, sys
+PROBE = '''import importlib.util, json, pathlib, sys, subprocess
 mandate, root = sys.argv[1], pathlib.Path(sys.argv[2])
 spec = importlib.util.spec_from_file_location('subject', root / 'subject.py')
 m = importlib.util.module_from_spec(spec)
@@ -42,16 +42,29 @@ if mandate == 'breaker_a':
         rejected = False
     check(rejected, 'Executed count(-1); negative input was accepted', 'Reject negative counts')
 elif mandate == 'breaker_b':
-    for i in range(100):
-        assert m.count(str(i)) == i
-    print('Executed bounded repeated-call probe')
+    class DelayedDependency:
+        def __int__(self):
+            raise TimeoutError('synthetic unavailable dependency')
+    try:
+        m.count(DelayedDependency())
+    except TimeoutError:
+        pass
+    else:
+        raise AssertionError('Dependency timeout was swallowed')
+    assert m.count('7') == 7
+    print('Executed dependency timeout and subsequent call; fixture has no concurrency')
 elif mandate == 'breaker_c':
     try:
         m.count('invalid')
     except ValueError:
         pass
     assert m.count('2') == 2
-    print('Executed failure then successful retry lifecycle')
+    base = subprocess.check_output(['git', '-C', str(root), 'rev-list', '--max-parents=0', 'HEAD'], text=True).strip()
+    old = subprocess.check_output(['git', '-C', str(root), 'show', base + ':subject.py'], text=True)
+    restored = {}
+    exec(compile(old, '<isolated rollback snapshot>', 'exec'), restored)
+    assert restored['count']('2') == m.count('2') == 2
+    print('Executed failure/retry and isolated prior-version rollback interoperability')
 elif mandate == 'scope':
     check(not (root / 'unrequested.txt').exists(), 'Inspected full fixture tree: unrequested.txt exists', 'Remove unrequested file')
 else:
@@ -141,6 +154,17 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
                     findings=result['findings'], verification_run=[{'kind':'executed', 'command':'fixture probe ' + member['mandate'], 'result':json.dumps(result)}],
                     prior_findings=[{'finding_id': f['finding_id'], 'status': 'open' if result['findings'] else 'closed',
                                      'evidence': {'kind':'executed', 'command':'fixture probe ' + member['mandate'], 'result':json.dumps(result)}} for f in prior])
+                if member['mandate'] == 'scope':
+                    receipt['scope'] = {
+                        'mapping': [{'requirement': 'Reject negative counts; no additional files',
+                                     'change': 'subject.py negative-input validation and full fixture tree',
+                                     'evidence': receipt['verification_run'][0]}],
+                        'missing_evidence': [],
+                        'extraneous': ['unrequested.txt'] if result['findings'] else [],
+                        'safety_dispositions': [{'change': 'negative-input ValueError',
+                            'requirement': 'Reject negative counts', 'rationale': 'Input rejection is the requested safety correction.',
+                            'disposition': 'necessary_safety', 'follow_up': None}],
+                    }
                 name, arguments = 'kanban_complete', {'summary': 'Executed isolated fixture probe', 'metadata': {'bounded_review': receipt}}
             call = {'id': 'call_' + str(step), 'type': 'function',
                     'function': {'name': name, 'arguments': json.dumps(arguments)}}
@@ -189,7 +213,7 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
         workspace_kind='dir', workspace_path=str(repo), model_override='openai/gpt-5', provider_override='openrouter')
     attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
-        base_sha=base, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
+        base_sha=base, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES | {'docs', 'system'}),
         consumed={'rounds': 0, 'recovery': 0, 'active_seconds': 0},
         compatibility=writer_receipts(conn), decision='synthetic pilot')
     monkeypatch.setattr(dispatch, '_resolve_hermes_argv', lambda: [sys.executable, str(root / 'tests/hermes_cli/kanban_worker_probe.py'), str(root)])

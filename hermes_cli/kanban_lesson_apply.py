@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import tempfile
+import uuid
 from pathlib import Path
 
 from hermes_cli.kanban_db_connect import write_txn, _try_lock_nb, _unlock
@@ -62,16 +62,40 @@ def _valid_history(data):
     return True
 
 
-def _replace(reference, content):
-    fd,name=tempfile.mkstemp(prefix='.verified-procedures-',dir=reference.parent)
+def _replace(reference, content, expected_hash):
+    # Anchor every component with no-follow directory descriptors. A renamed
+    # parent cannot redirect either the temporary file or replacement elsewhere.
+    if os.open not in os.supports_dir_fd or not hasattr(os, 'O_NOFOLLOW'):
+        raise OSError('safe procedural reference replacement unavailable')
+    if _paths(rollback=True) != reference:
+        raise ValueError('protected procedural destination changed')
+    directory = os.open(reference.anchor, os.O_RDONLY | os.O_DIRECTORY)
+    name = '.verified-procedures-' + uuid.uuid4().hex
+    created = False
     try:
-        with os.fdopen(fd,'wb') as handle:
+        for component in reference.parent.parts[1:]:
+            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                            dir_fd=directory)
+            os.close(directory)
+            directory = child
+        with os.fdopen(os.open(reference.name, os.O_RDONLY | os.O_NOFOLLOW,
+                               dir_fd=directory), 'rb') as handle:
+            if digest(handle.read(1024 * 1024 + 1)) != expected_hash:
+                raise ValueError('stale procedural reference hash at replacement')
+        fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                     0o600, dir_fd=directory)
+        created = True
+        with os.fdopen(fd, 'wb') as handle:
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(name,reference)
+        os.replace(name, reference.name, src_dir_fd=directory, dst_dir_fd=directory)
+        created = False
+        os.fsync(directory)
     finally:
-        Path(name).unlink(missing_ok=True)
+        if created:
+            os.unlink(name, dir_fd=directory)
+        os.close(directory)
 
 
 def apply_next(conn, *, expected_hash=None):
@@ -109,7 +133,7 @@ def apply_next(conn, *, expected_hash=None):
             if _paths()!=reference:
                 return False
             if digest(current)==pending['before_hash']:
-                _replace(reference,pending['after_image'])
+                _replace(reference,pending['after_image'],pending['before_hash'])
             if digest(reference.read_bytes())!=pending['after_hash']:
                 raise ValueError('procedural update verification failed')
             with write_txn(conn):
@@ -137,11 +161,12 @@ def rollback(conn, lesson_id, *, expected_hash, decision):
                 if not row or row['after_hash']!=expected_hash or row['status'] not in {'applied','rolling_back'}:
                     raise ValueError('stale rollback identity')
                 allowed={row['after_hash']} if row['status']=='applied' else {row['after_hash'],row['before_hash']}
-                if digest(reference.read_bytes()) not in allowed:
+                current_hash = digest(reference.read_bytes())
+                if current_hash not in allowed:
                     raise ValueError('stale rollback hash')
                 conn.execute("UPDATE workflow_lesson_updates SET status='rolling_back',rollback_decision=? WHERE lesson_id=?",
                              (digest(decision.encode()),lesson_id))
-            _replace(reference,row['before_image'])
+            _replace(reference,row['before_image'],current_hash)
             if digest(reference.read_bytes())!=row['before_hash']:
                 raise ValueError('rollback verification failed')
             with write_txn(conn):

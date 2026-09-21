@@ -38,12 +38,16 @@ def reject_decomposition(conn, task_id):
 
 
 def reject_nested_creation(conn, creator_task_id):
+    import os
     from hermes_cli.kanban_review_worker import restricted_worker
     from hermes_cli.kanban_postmortem import is_diagnostic
-    if (restricted_worker() or (creator_task_id and (
-            conn.execute('SELECT 1 FROM review_members WHERE task_id=?', (creator_task_id,)).fetchone()
-            or is_diagnostic(conn, creator_task_id)))):
-        raise ValueError('nested task creation from managed review or diagnostic workers is prohibited')
+    from hermes_cli.kanban_review_state import get_attempt
+    # Implementers must not evade the same lineage by creating an ordinary card.
+    # Check the authenticated worker context even when it omits creator metadata.
+    creators = {creator_task_id, os.environ.get('HERMES_KANBAN_TASK')} - {None}
+    if restricted_worker() or any(get_attempt(conn, task) or is_diagnostic(conn, task)
+                                  for task in creators):
+        raise ValueError('nested task creation from managed implementation, review or diagnostic workers is prohibited')
 
 
 def identity_valid(conn, attempt):

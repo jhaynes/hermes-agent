@@ -9,7 +9,7 @@ from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli.kanban_db_connect import connect, write_txn
 
 
-@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent','validator_failure'])
+@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent','validator_failure','path_swap','hash_race','recurrence'])
 def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_path, monkeypatch, attack):
     home=tmp_path/'.hermes'
     home.mkdir()
@@ -80,6 +80,30 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
         'validator_profile':'validator','auto_apply_lessons':True,
         'protected_skill_hash':hashlib.sha256(skill.read_bytes()).hexdigest()}}}))
     (home/'config.yaml').write_text(json.dumps(config))
+    if attack in {'path_swap', 'hash_race'}:
+        from hermes_cli import kanban_lesson_apply as apply
+        original_replace = apply._replace
+        outside = tmp_path / 'protected'
+        outside.mkdir()
+        victim = outside / reference.name
+        victim.write_bytes(b'protected external bytes\n')
+        concurrent_bytes = b'concurrent update must survive\n'
+        def race(*args, **kwargs):
+            if attack == 'path_swap':
+                reference.parent.rename(reference.parent.with_name('retained-references'))
+                reference.parent.symlink_to(outside, target_is_directory=True)
+            else:
+                reference.write_bytes(concurrent_bytes)
+            return original_replace(*args, **kwargs)
+        monkeypatch.setattr(apply, '_replace', race)
+        dispatch.dispatch_once(conn, spawn_fn=lambda *a: None, max_spawn=0)
+        assert victim.read_bytes() == b'protected external bytes\n'
+        if attack == 'hash_race':
+            assert reference.read_bytes() == concurrent_bytes
+        assert conn.execute('SELECT status FROM workflow_lessons').fetchone()[0] == 'pending_approval'
+        assert skill.read_bytes() == original_skill
+        conn.close()
+        return
     if attack=='application_io_failure':
         from hermes_cli import kanban_lesson_apply as apply
         def fail_write(*args):
@@ -143,6 +167,21 @@ print(json.dumps(result))
     assert len(reference.read_bytes().splitlines()) == 1, 'Crash/retry/concurrent apply cannot append twice'
     next_task=kb.create_task(conn,title='subsequent intake',assignee=None)
     assert lesson['id'] in kb.build_worker_context(conn,next_task)
+    if attack == 'recurrence':
+        assert kb.unblock_task(conn, owner)
+        recurrence = kb.claim_task(conn, owner)
+        assert recurrence is not None
+        with write_txn(conn):
+            kb._append_event(conn, owner, 'timed_out', {'elapsed_seconds': 12, 'limit_seconds': 10},
+                             run_id=recurrence.current_run_id)
+        later = conn.execute('SELECT * FROM workflow_incidents ORDER BY rowid DESC LIMIT 1').fetchone()
+        assert later['prior_incident_id'] == incident['id']
+        assert conn.execute('SELECT status FROM workflow_lessons WHERE id=?', (lesson['id'],)).fetchone()[0] == 'pending_approval'
+        assert lesson['id'] not in kb.build_worker_context(conn, next_task)
+        assert reference.read_bytes(), 'Reevaluation retains append-only audit evidence'
+        assert later['lesson_status'] == 'pending_approval'
+        conn.close()
+        return
     from hermes_cli import kanban_lesson_apply as apply
     with pytest.raises(ValueError,match='stale'):
         apply.apply_next(conn,expected_hash=hashlib.sha256(b'').hexdigest())

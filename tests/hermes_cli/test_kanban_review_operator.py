@@ -4,6 +4,7 @@ import json
 import hashlib
 import pytest
 from tests.hermes_cli.review_readiness_helpers import writer_receipts
+from tests.hermes_cli.review_evidence_helpers import scope_evidence
 from hermes_cli import kanban as cli
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_review_state as state
@@ -137,7 +138,7 @@ def test_parent_finding_disposition_retains_original_receipt(tmp_path, monkeypat
             result = {key:attempt[key] for key in ('board_id','base_sha','target_sha','policy_digest','spec_digest')}
             result.update(attempt_id=attempt['id'],round_id=round_id,mandate=member['mandate'],task_id=child,run_id=run.current_run_id,
                           verdict='request_changes' if member['mandate']=='scope' else 'approve',
-                          findings=[finding] if member['mandate']=='scope' else [],verification_run=[evidence],prior_findings=[])
+                          findings=[finding] if member['mandate']=='scope' else [],verification_run=[evidence],prior_findings=[],scope=scope_evidence(evidence))
             assert kb.complete_task(conn,child,expected_run_id=run.current_run_id,metadata={'bounded_review':result})
         current = state.get_attempt(conn,task)
         original = conn.execute("SELECT receipt FROM review_members WHERE mandate='scope'").fetchone()[0]

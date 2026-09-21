@@ -141,3 +141,27 @@ def test_managed_identity_cannot_be_rewritten_by_legacy_paths(tmp_path, monkeypa
         assert state.get_attempt(conn, task)['state'] == 'held'
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize('source', ['creator', 'worker'])
+def test_implementation_owner_cannot_recreate_unmanaged_work(tmp_path, monkeypatch, source):
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    conn = connect(tmp_path / 'board.db')
+    try:
+        owner = kb.create_task(conn, title='approved ask', assignee='builder')
+        attempt = enroll(conn, owner)
+        with write_txn(conn):
+            state.hold(conn, attempt, 'review_exhausted')
+        kwargs = {'creator_task_id': owner} if source == 'creator' else {}
+        if source == 'worker':
+            monkeypatch.setenv('HERMES_KANBAN_TASK', owner)
+            monkeypatch.setenv('HERMES_KANBAN_DB', str(tmp_path / 'board.db'))
+        with pytest.raises(ValueError, match='managed.*creation|nested'):
+            kb.create_task(conn, title='renamed replacement', assignee='builder', **kwargs)
+        assert len(kb.list_tasks(conn)) == 1
+        assert state.get_attempt(conn, owner)['id'] == attempt['id']
+        monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+        legacy = kb.create_task(conn, title='independent legacy ask', assignee='builder')
+        assert kb.claim_task(conn, legacy) is not None
+    finally:
+        conn.close()

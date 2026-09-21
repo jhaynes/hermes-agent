@@ -101,3 +101,14 @@ def failed(conn, task_id, outcome):
         return
     conn.execute("UPDATE workflow_lessons SET status='pending_approval' WHERE validator_task=? AND status='proposed'",(task_id,))
     conn.execute("UPDATE workflow_incidents SET lesson_status='pending_approval' WHERE id IN (SELECT incident_id FROM workflow_lessons WHERE validator_task=?)",(task_id,))
+
+
+def reevaluate_recurrence(conn, incident_id, fingerprint):
+    # An applied tip is not evidence of prevention. Keep its append-only audit
+    # but stop recommending it automatically after the same failure recurs.
+    changed = conn.execute("""UPDATE workflow_lessons SET status='pending_approval'
+        WHERE status='applied' AND incident_id IN
+            (SELECT id FROM workflow_incidents WHERE fingerprint=?)""", (fingerprint,)).rowcount
+    if changed:
+        conn.execute("""UPDATE workflow_incidents SET lesson_status='pending_approval'
+            WHERE id=? OR (fingerprint=? AND lesson_status='applied')""", (incident_id, fingerprint))

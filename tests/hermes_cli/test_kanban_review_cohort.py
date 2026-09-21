@@ -3,6 +3,7 @@ import importlib.util
 import pytest
 from hermes_cli import kanban_db as kb
 from tests.hermes_cli.review_readiness_helpers import writer_receipts
+from tests.hermes_cli.review_evidence_helpers import scope_evidence
 from hermes_cli import kanban_review_state as state
 from hermes_cli.kanban_db_connect import connect
 
@@ -47,7 +48,7 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
                    'base_sha':attempt['base_sha'],'target_sha':attempt['target_sha'],
                    'policy_digest':attempt['policy_digest'],'spec_digest':attempt['spec_digest'],
                    'mandate':card['mandate'],'verdict':'request_changes' if findings else 'approve',
-                   'findings':findings,'verification_run':[{'kind':'reasoned','reasoning':'synthetic unit-test review'}], 'prior_findings':[]}
+                   'findings':findings,'verification_run':[{'kind':'reasoned','reasoning':'synthetic unit-test review'}], 'prior_findings':[], 'scope':scope_evidence()}
         assert kb.complete_task(conn, card['task_id'], expected_run_id=lane_run.current_run_id,
                                 metadata={'bounded_review':receipt})
         if card['mandate'] != 'scope':

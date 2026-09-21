@@ -132,6 +132,9 @@ def capture_event(conn, event_id, task_id, run_id, kind, payload, created_at):
          'complete' if expected else 'queued', json.dumps([event_id]), report, created_at),
     )
     conn.execute('INSERT INTO workflow_incident_events VALUES(?,?)', (event_id, incident_id))
+    if previous:
+        from hermes_cli.kanban_workflow_lessons import reevaluate_recurrence
+        reevaluate_recurrence(conn, incident_id, fingerprint)
 
 
 def diagnose_unowned_queue(conn, stale_timeout_seconds):
