@@ -138,7 +138,8 @@ def test_successor_requires_current_writer_readiness(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('module_name,symbol', [
-    ('kanban_review_transport', 'pin_route'), ('kanban_worker_launch', 'adopt_reserved_launch'),
+    ('hermes_cli.kanban_review_transport', 'pin_route'), ('hermes_cli.kanban_worker_launch', 'adopt_reserved_launch'),
+    ('agent.codex_runtime', 'run_codex_stream'), ('agent.chat_completion_helpers', '_chat_summary_attempt'),
 ])
 def test_changed_transport_or_launch_capability_cannot_claim(tmp_path, monkeypatch, module_name, symbol):
     import importlib
@@ -151,7 +152,7 @@ def test_changed_transport_or_launch_capability_cannot_claim(tmp_path, monkeypat
             state.enroll_review(conn, task, **enrollment(conn), compatibility=writer_receipts(conn))
             state.reserve_action(conn, task, category='preflight', expected_version=0)
             with monkeypatch.context() as changed:
-                changed.setattr(importlib.import_module('hermes_cli.' + module_name), symbol, lambda *a: None)
+                changed.setattr(importlib.import_module(module_name), symbol, lambda *a: None)
                 readiness.runtime_digest.cache_clear()
                 assert kb.claim_task(conn, task) is None, 'Changed loaded execution enforcement must invalidate writer readiness'
                 assert state.get_attempt(conn, task)['state'] == 'held'

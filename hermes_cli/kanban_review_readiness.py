@@ -67,6 +67,12 @@ def runtime_digest():
     kb = importlib.import_module('hermes_cli.kanban_db')
     code['lifecycle'] = {name:_code_value(getattr(kb, name).__code__) for name in (
         'claim_task', 'claim_review_task', 'complete_task', 'request_review', 'request_changes')}
+    for module_name, names in (
+        ('agent.codex_runtime', ('run_codex_stream',)),
+        ('agent.chat_completion_helpers', ('_chat_summary_attempt', '_codex_summary_attempt')),
+    ):
+        module = importlib.import_module(module_name)
+        code[module_name] = {name: _code_value(getattr(module, name).__code__) for name in names}
     return hashlib.sha256(json.dumps(code, sort_keys=True).encode()).hexdigest()
 
 

@@ -122,6 +122,15 @@ managed tables or claim that feature-disable makes legacy dispatch safe.
 
 ## Isolated verification
 
+Managed SDK sends, including shared-primary Responses streams and iteration-limit
+summaries, must use the admitted endpoint/model and recheck the current run,
+identity, hold and deadline at each HTTP send. Responses reconnects perform the
+same check. Shared clients with SDK retries enabled are refused rather than
+silently used outside the finite request-local contract; unsupported transports
+remain unavailable for managed work. This does not change unmanaged routing.
+Readiness fingerprints include these loaded native-send entry points. Loopback
+synthetic endpoint tests do not attest a live provider or an installed runtime.
+
 Run `scripts/run_tests.sh -j 1 tests/hermes_cli/test_kanban_review_readiness*.py
  tests/hermes_cli/test_kanban_review_legacy*.py tests/hermes_cli/test_kanban_review_operator.py`
 (as one shell command). The live-readiness test starts disposable gateway-control

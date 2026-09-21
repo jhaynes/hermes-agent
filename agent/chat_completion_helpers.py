@@ -2090,6 +2090,7 @@ def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
 
 
 def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
+    from hermes_cli.kanban_review_transport import guard_client
     # Same kwargs builder as the main loop so the summary keeps the cached prefix (tools,
     # prompt_cache_key, xAI alias, Moonshot sanitization). Do not omit tools or force
     # tool_choice="none" here: SGLang renders the prompt with tools=None in that mode and the KV
@@ -2102,7 +2103,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
     def _attempt(retry_count: int) -> str:
         summary_client = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry" if retry_count else "iteration_limit_summary")
         response = _managed_summary_call(
-            agent, api_request_id, summary_kwargs, lambda request: summary_client.chat.completions.create(**request), retry_count=retry_count)
+            agent, api_request_id, summary_kwargs, lambda request: guard_client(agent, summary_client).chat.completions.create(**request), retry_count=retry_count)
         return _summary_text(agent, response)
     return _attempt
 

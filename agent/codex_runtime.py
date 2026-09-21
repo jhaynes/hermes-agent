@@ -896,7 +896,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
 
     def _open_codex_stream(next_api_kwargs: dict[str, Any]):
         from hermes_cli.providers import is_actual_route
+        from hermes_cli.kanban_review_transport import guard_client
 
+        guard_client(agent, active_client)
         if is_actual_route(
             getattr(agent, "provider", ""),
             str(getattr(active_client, "base_url", "") or ""),
