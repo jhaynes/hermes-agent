@@ -135,3 +135,25 @@ def test_successor_requires_current_writer_readiness(tmp_path, monkeypatch):
         assert invoke(tmp_path, task, decision) != 0
         assert state.get_attempt(conn, new) is None
         assert state.get_attempt(conn, task)['completed_rounds'] == 3
+
+
+@pytest.mark.parametrize('module_name,symbol', [
+    ('kanban_review_transport', 'pin_route'), ('kanban_worker_launch', 'adopt_reserved_launch'),
+])
+def test_changed_transport_or_launch_capability_cannot_claim(tmp_path, monkeypatch, module_name, symbol):
+    import importlib
+    from hermes_cli import kanban_review_readiness as readiness
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    readiness.runtime_digest.cache_clear()
+    try:
+        with connect(tmp_path / 'board.db') as conn:
+            task = kb.create_task(conn, title='pinned execution enforcement', assignee='builder')
+            state.enroll_review(conn, task, **enrollment(conn), compatibility=writer_receipts(conn))
+            state.reserve_action(conn, task, category='preflight', expected_version=0)
+            with monkeypatch.context() as changed:
+                changed.setattr(importlib.import_module('hermes_cli.' + module_name), symbol, lambda *a: None)
+                readiness.runtime_digest.cache_clear()
+                assert kb.claim_task(conn, task) is None, 'Changed loaded execution enforcement must invalidate writer readiness'
+                assert state.get_attempt(conn, task)['state'] == 'held'
+    finally:
+        readiness.runtime_digest.cache_clear()

@@ -25,7 +25,8 @@ from hermes_cli.kanban_db_connect import write_txn
 PROTOCOL = 1
 SURFACES = frozenset({'cli', 'gateway', 'dashboard'})
 _MODULES = ('kanban_review_state', 'kanban_review_guards', 'kanban_review_cohort',
-            'kanban_review_operator', 'kanban_review_readiness', 'kanban_review_legacy')
+            'kanban_review_operator', 'kanban_review_readiness', 'kanban_review_legacy',
+            'kanban_review_worker', 'kanban_review_transport', 'kanban_worker_launch')
 
 
 def initialize(conn):
