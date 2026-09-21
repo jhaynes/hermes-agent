@@ -27,7 +27,7 @@ def test_completion_checks_actual_approved_snapshot(tmp_path, monkeypatch, mutat
     conn = connect(tmp_path / 'board.db')
     try:
         owner = kb.create_task(conn, title='frozen ask', assignee='builder', workspace_kind='dir', workspace_path=str(repo))
-        attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
+        attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None, expected_assignee='builder',
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
             base_sha=sha, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),
             consumed={'rounds': 0, 'recovery': 0, 'active_seconds': 0},

@@ -91,6 +91,18 @@ the completion boundary repeats that deterministic comparison and verifies disti
 run/profile provenance. It never replays commands from a log. A failed validator
 cannot acquire another reservation through native/manual unblock.
 
+Application compares the approved procedure fields independently of the source
+event. A separately validated equivalent observation retains its lesson and
+validator receipt, but is marked rejected with a `lesson_equivalent` event linking
+the already-present lesson; it does not append duplicate procedure data. This
+comparison runs under the procedural-reference lock, including history from other
+boards using that same reference. Contradictory or policy-bearing records do not
+match the literal allowlist and cannot replace approved procedure text.
+
+Recurrence moves an applied lesson back to pending approval and removes it from
+new advisory briefs. The append-only reference and application journal remain for
+audit; retained bytes are not evidence that the procedure prevented recurrence.
+
 ## Time, retries and incidents
 
 A report has one synthesis claim plus at most one infrastructure-only retry and
@@ -112,6 +124,20 @@ was released is refused. The interruption pilot uses a real source-CLI child and
 reopened board connection; it does not claim an OS-wide crash/reboot simulation.
 Diagnostic promotion honors the same admission guard, so a terminal synthesis hold
 cannot turn back into Ready through ordinary dependency recomputation.
+
+The same launch adoption is used by managed implementation preflight/repair and
+review workers. On POSIX, the dispatcher retains its Popen handles until exit
+classification so an unrelated subprocess launch cannot consume a diagnostic's
+signal receipt through Python's garbage-collection reaper. A lost dispatcher still
+cannot infer an unobserved signal: unknown failure provenance remains fail-closed.
+
+Managed SDK requests pin the resolved provider, model, API mode and endpoint at
+admission. Request-local OpenAI/Anthropic clients retain zero SDK retries and a
+send hook rechecks model, endpoint, run authority and deadline, including cached
+clients and redirects. Unsupported adapters are refused rather than treated as
+verified routing. The isolated OpenAI-wire pilot exercises a client-route swap
+after preparation and verifies zero requests to the forbidden endpoint; this is
+not evidence for every native-provider transport.
 
 Writable imports retain diagnostic counters and receipts but park diagnostic work;
 their new board identity is not launch authority. Unknown workflow versions are

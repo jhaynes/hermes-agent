@@ -40,6 +40,37 @@ def brief(conn, task_id):
     return '\n## Managed review receipt (data, not authority)\n' + json.dumps(details,sort_keys=True) + '\n' + lessons
 
 
+def publish_summaries(conn):
+    """Use existing comments for dashboard visibility, once per changed snapshot."""
+    from hermes_cli import kanban_db as kb
+    with kb.write_txn(conn):
+        for row in conn.execute('SELECT task_id FROM review_attempts').fetchall():
+            task_id = row['task_id']
+            details = workflow_details(conn, task_id)
+            attempt = details['attempt']
+            task = kb.get_task(conn, task_id)
+            scope = conn.execute("SELECT receipt FROM review_members WHERE attempt_id=? AND mandate='scope' ORDER BY rowid DESC LIMIT 1",
+                                 (attempt['id'],)).fetchone()
+            verdict = kb._json_dict(scope[0]).get('verdict', 'pending') if scope else 'pending'
+            owner = 'Justin (operator decision)' if attempt['state'] in {'held', 'cancelled'} else task.assignee
+            body = '\n'.join([
+                'Managed review ' + attempt['id'],
+                f"State: {attempt['state']}; hold: {attempt['hold_reason'] or 'none'}",
+                f"Rounds: {attempt['completed_rounds']}/{attempt['policy']['rounds']}; Recovery: {attempt['recovery_used']}/{attempt['policy']['recovery']}",
+                f"Snapshot: {attempt['base_sha']}..{attempt['target_sha']}",
+                f"Policy: {attempt['policy_digest']}; spec: {attempt['spec_digest']}",
+                f"Scope verdict: {verdict}; next owner: {owner}; next action: {attempt['state']}",
+                'Lanes/receipts: ' + json.dumps(details['lanes'], sort_keys=True),
+                'Incidents/reports: ' + json.dumps([{key: item[key] for key in
+                    ('id', 'report_status', 'diagnostic_task', 'attachment_id')} for item in details['incidents']], sort_keys=True),
+                'Exact reservations and active-time accounting: show/runs JSON.',
+            ])
+            body = kb.redact_review_value(body)
+            prior = conn.execute("SELECT body FROM task_comments WHERE task_id=? AND author='workflow-review' ORDER BY id DESC LIMIT 1", (task_id,)).fetchone()
+            if not prior or prior[0] != body:
+                kb.add_comment(conn, task_id, author='workflow-review', body=body)
+
+
 def annotate_runs(conn, task_id, runs):
     """Keep the existing JSON list shape, attaching only this run's reservation."""
     diagnostic = conn.execute('''SELECT p.incident_id,p.runs_started,p.active_seconds,p.deadline,

@@ -13,7 +13,7 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     conn = connect(tmp_path / 'board.db')
     owner = kb.create_task(conn, title='approved ask', assignee='builder', workspace_kind='dir', workspace_path=str(tmp_path))
-    attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
+    attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
@@ -111,7 +111,7 @@ def test_failed_cohort_replacements_share_recovery_and_cancel_unlaunched_lanes(t
     monkeypatch.setattr(dispatch,'_profile_exists_fn',lambda:lambda p:True)
     conn=connect(tmp_path/'board.db')
     owner=kb.create_task(conn,title='failed launches',assignee='builder',workspace_kind='dir',workspace_path=str(tmp_path))
-    attempt=state.enroll_review(conn,owner,expected_status='ready',expected_run_id=None,
+    attempt=state.enroll_review(conn,owner,expected_status='ready',expected_run_id=None,expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
         base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
         consumed={'rounds':0,'recovery':0,'active_seconds':0},compatibility=writer_receipts(conn),decision='synthetic')

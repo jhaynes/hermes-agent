@@ -19,7 +19,7 @@ def test_managed_export_import_preserves_history_but_not_launch_authority(tmp_pa
     kb.create_board('source')
     with connect_closing(board='source') as conn:
         owner = kb.create_task(conn, title='finite imported work', assignee='builder')
-        attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
+        attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None, expected_assignee='builder',
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
             implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),

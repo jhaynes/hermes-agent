@@ -117,6 +117,22 @@ def apply_next(conn, *, expected_hash=None):
                     lesson=conn.execute("SELECT * FROM workflow_lessons WHERE status='validated' ORDER BY rowid LIMIT 1").fetchone()
                     if not lesson:
                         return False
+                    record = json.loads(lesson['record'])
+                    # Source events establish provenance, not a new procedure.
+                    # Compare under the reference lock, including records written
+                    # by another board sharing this default-profile reference.
+                    procedure = {key: value for key, value in record.items() if key != 'source_event'}
+                    for line in current.decode().splitlines():
+                        prior = json.loads(line)
+                        if procedure != {key: value for key, value in prior['record'].items() if key != 'source_event'}:
+                            continue
+                        conn.execute("UPDATE workflow_lessons SET status='rejected' WHERE id=?", (lesson['id'],))
+                        conn.execute("UPDATE workflow_incidents SET lesson_status='rejected' WHERE id=?", (lesson['incident_id'],))
+                        from hermes_cli.kanban_db import _append_event
+                        owner = conn.execute('SELECT task_id FROM workflow_incidents WHERE id=?', (lesson['incident_id'],)).fetchone()[0]
+                        _append_event(conn, owner, 'lesson_equivalent',
+                                      {'lesson_id': lesson['id'], 'equivalent_to': prior['lesson_id']})
+                        return False
                     version=len(current.splitlines())+1
                     entry={'lesson_id':lesson['id'],'version':version,'incident_id':lesson['incident_id'],
                            'validator_run':lesson['validator_run'],'record':json.loads(lesson['record'])}

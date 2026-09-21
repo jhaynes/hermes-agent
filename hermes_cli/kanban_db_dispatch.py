@@ -228,7 +228,8 @@ def _classify_worker_exit(pid: int) -> "tuple[str, Optional[int]]":
 
 def reap_worker_zombies() -> "list[int]":
     """Reap all zombie children without blocking; returns reaped PIDs. No-op on Windows."""
-    reaped: "list[int]" = []
+    from hermes_cli.kanban_worker_launch import reap_children
+    reaped: "list[int]" = reap_children(_record_worker_exit)
     if os.name != "nt":
         try:
             while True:
@@ -2087,6 +2088,9 @@ def _dispatch_once_locked(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    if not dry_run:
+        from hermes_cli.kanban_review_output import publish_summaries
+        publish_summaries(conn)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
@@ -2642,6 +2646,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
+    from hermes_cli.kanban_worker_launch import retain_child
+    retain_child(proc)
     return proc.pid
 
 

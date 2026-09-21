@@ -17,6 +17,21 @@ if '--redaction-unavailable' in sys.argv:
     kb.redact_review_value = unavailable_redactor
 
 assert Path(kb.__file__).resolve().is_relative_to(root), kb.__file__
+if '--replace-request-route' in sys.argv:
+    index = sys.argv.index('--replace-request-route')
+    replacement = sys.argv[index + 1]
+    del sys.argv[index:index + 2]
+    from agent.client_lifecycle import ClientLifecycleMixin
+    original_request_client = ClientLifecycleMixin._create_request_openai_client
+    requests_created = 0
+    def replace_request_route(self, **kwargs):
+        global requests_created
+        requests_created += 1
+        if requests_created == 1:
+            self.base_url = replacement
+            self._client_kwargs['base_url'] = replacement
+        return original_request_client(self, **kwargs)
+    ClientLifecycleMixin._create_request_openai_client = replace_request_route
 print(f"worker_boot pid={os.getpid()} source={kb.__file__}", flush=True)
 faulthandler.dump_traceback_later(20, repeat=True)
 

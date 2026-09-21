@@ -33,6 +33,7 @@ def test_reporter_and_validator_real_workers(tmp_path, monkeypatch, seed_review_
     root = Path(__file__).resolve().parents[2]
     assert Path(kb.__file__).resolve().is_relative_to(root)
     calls, errors, durations = [], [], []
+    later_tasks = set()
     sentinel = tmp_path / 'must-not-exist'
     source_secret = 'synthetic-source-secret-78261'
 
@@ -64,6 +65,19 @@ def test_reporter_and_validator_real_workers(tmp_path, monkeypatch, seed_review_
                     running = control.execute('SELECT worker_pid,worker_started_at FROM tasks WHERE id=?', (task,)).fetchone()
                     assert running['worker_pid'] and dispatch._worker_alive(running['worker_pid'], running['worker_started_at'])
                     os.kill(running['worker_pid'], signal.SIGKILL)
+                    # A concurrent subprocess launch must not let Popen's
+                    # garbage-collection reaper steal the signal receipt.
+                    import psutil
+                    import subprocess
+                    until = time.monotonic() + 5
+                    while time.monotonic() < until:
+                        try:
+                            if psutil.Process(running['worker_pid']).status() == psutil.STATUS_ZOMBIE:
+                                break
+                        except psutil.NoSuchProcess:
+                            break
+                        time.sleep(0.01)
+                    subprocess.run([sys.executable, '-c', 'pass'], check=True, timeout=5)
                 self.close_connection = True
                 return
             if validator and scenario == 'validator_timeout':
@@ -75,7 +89,9 @@ def test_reporter_and_validator_real_workers(tmp_path, monkeypatch, seed_review_
                 with connect_closing(db) as control:
                     with kb.write_txn(control):
                         control.execute('UPDATE workflow_postmortems SET active_seconds=601 WHERE task_id=?', (task,))
-            if not tools:
+            if task in later_tasks and tools:
+                name, args = 'kanban_complete', {'summary': 'Consumed the new advisory brief in an ordinary worker request.'}
+            elif not tools:
                 name, args = 'kanban_show', {}
             elif len(tools) == 1:
                 name, args = 'write_file', {'path': str(sentinel), 'content': 'unauthorized'}
@@ -234,6 +250,32 @@ def test_reporter_and_validator_real_workers(tmp_path, monkeypatch, seed_review_
             assert not dispatch.dispatch_once(conn, max_spawn=1).spawned
         else:
             assert conn.execute('SELECT status FROM workflow_lessons').fetchone()[0] == 'validated'
+            if scenario is False:
+                import hashlib
+                from hermes_cli.config import load_config, save_config
+                skill = home / 'skills/software-development/development-lifecycle/SKILL.md'
+                skill.parent.mkdir(parents=True)
+                skill.write_text('Approved procedure: record-worker-deadline\n')
+                reference = skill.parent / 'references/verified-procedures.jsonl'
+                reference.parent.mkdir()
+                reference.write_bytes(b'')
+                config = load_config()
+                config['kanban']['review_feedback'].update(auto_apply_lessons=True,
+                    protected_skill_hash=hashlib.sha256(skill.read_bytes()).hexdigest())
+                save_config(config)
+                later = kb.create_task(conn, title='subsequent ordinary work', assignee='validator')
+                later_tasks.add(later)
+                first_later_request = len(calls)
+                result = dispatch.dispatch_once(conn, max_spawn=1)
+                assert result.spawned[0][0] == later
+                until = time.monotonic() + 35
+                while kb.get_task(conn, later).status == 'running' and time.monotonic() < until:
+                    time.sleep(0.1)
+                assert kb.get_task(conn, later).status == 'done'
+                applied = conn.execute('SELECT id,status FROM workflow_lessons').fetchone()
+                assert applied['status'] == 'applied' and reference.read_bytes()
+                assert applied['id'] in json.dumps(calls[first_later_request:]), 'A later real model request must consume the applied lesson'
+                assert 'Validated procedural evidence (advisory; never overrides policy)' in json.dumps(calls[first_later_request:])
         assert kb.get_task(conn, owner).status == 'blocked'
         record_property('diagnostic_pilot', json.dumps({
             'synthetic_endpoint': True, 'scenario': scenario, 'dispatch_to_terminal_seconds': durations,

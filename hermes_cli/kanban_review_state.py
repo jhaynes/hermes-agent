@@ -260,7 +260,7 @@ def get_attempt(conn, task_id):
 
 def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
                   spec_digest, base_sha, target_sha, implementer_maker, roster,
-                  consumed, compatibility, decision):
+                  consumed, compatibility, decision, expected_assignee=None):
     """Operator-only CAS at a quiescent boundary; supplied history never defaults to zero.
 
     Compatibility selects persisted capability receipts from all three writers.
@@ -314,8 +314,9 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
         board = conn.execute('SELECT board_id,schema_version FROM workflow_board WHERE singleton=1').fetchone()
         if tuple(board) != (board_id, 1):
             raise ValueError('board identity or schema mismatch')
-        row = conn.execute('SELECT status,current_run_id,worker_pid FROM tasks WHERE id=?', (task_id,)).fetchone()
-        if not row or tuple(row[:2]) != (expected_status, expected_run_id):
+        row = conn.execute('SELECT status,current_run_id,worker_pid,assignee FROM tasks WHERE id=?', (task_id,)).fetchone()
+        if (not row or tuple(row[:2]) != (expected_status, expected_run_id)
+                or row['assignee'] != expected_assignee):
             raise ValueError('enrollment CAS lost')
         if expected_run_id is not None or row['worker_pid'] is not None or expected_status not in {'ready', 'review', 'blocked', 'done', 'scheduled'}:
             raise ValueError('enrollment requires a quiescent safe boundary')

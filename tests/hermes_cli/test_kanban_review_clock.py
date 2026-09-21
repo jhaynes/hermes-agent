@@ -16,7 +16,7 @@ def reviewing(tmp_path, monkeypatch, active=7190):
     owner = kb.create_task(conn, title='clock contract', assignee='builder',
                            workspace_kind='dir', workspace_path=str(tmp_path))
     attempt = state.enroll_review(
-        conn, owner, expected_status='ready', expected_run_id=None,
+        conn, owner, expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
         implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),

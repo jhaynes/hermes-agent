@@ -29,7 +29,7 @@ def test_scoped_operator_decision_preserves_budgets(tmp_path, monkeypatch, opera
         attempt = state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
-            roster=sorted(state.REQUIRED_LANES), consumed={'rounds':1,'recovery':1,'active_seconds':25},
+            roster=sorted(state.REQUIRED_LANES), consumed={'rounds':1,'recovery':1,'active_seconds':25}, expected_assignee='builder',
             compatibility=writer_receipts(conn), decision='synthetic')
         with write_txn(conn):
             state.hold(conn, attempt, 'operator_hold')
@@ -55,7 +55,7 @@ def test_scoped_operator_decision_preserves_budgets(tmp_path, monkeypatch, opera
         if operation == 'amend':
             clone = kb.create_task(conn, title='renamed original ask', assignee='builder')
             with pytest.raises(ValueError, match='lineage'):
-                state.enroll_review(conn, clone, expected_status='ready', expected_run_id=None,
+                state.enroll_review(conn, clone, expected_status='ready', expected_run_id=None, expected_assignee='builder',
                     board_id=attempt['board_id'], spec_digest=attempt['spec_digest'],
                     base_sha=attempt['base_sha'], target_sha=attempt['target_sha'], implementer_maker='openai',
                     roster=attempt['roster'], consumed={'rounds':0,'recovery':0,'active_seconds':0},
@@ -72,7 +72,7 @@ def test_exhausted_predecessor_needs_explicit_finite_successor(tmp_path, monkeyp
         attempt = state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
-            roster=sorted(state.REQUIRED_LANES), consumed={'rounds':3,'recovery':2,'active_seconds':7200},
+            roster=sorted(state.REQUIRED_LANES), consumed={'rounds':3,'recovery':2,'active_seconds':7200}, expected_assignee='builder',
             compatibility=writer_receipts(conn), decision='known exhausted history')
         successor = kb.create_task(conn, title='explicit next phase', assignee='builder')
         if diagnostic:
@@ -120,7 +120,7 @@ def test_parent_finding_disposition_retains_original_receipt(tmp_path, monkeypat
         attempt = state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64,base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',
-            roster=sorted(state.REQUIRED_LANES),consumed={'rounds':0,'recovery':0,'active_seconds':0},
+            roster=sorted(state.REQUIRED_LANES),consumed={'rounds':0,'recovery':0,'active_seconds':0}, expected_assignee='builder',
             compatibility=writer_receipts(conn),decision='synthetic')
         state.reserve_action(conn,task,category='preflight',expected_version=0)
         run = kb.claim_task(conn,task)

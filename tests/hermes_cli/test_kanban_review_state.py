@@ -16,7 +16,7 @@ def test_enrollment_pins_lineage_and_refuses_legacy_approval(tmp_path, monkeypat
         assert callable(enroll), 'Operator enrollment must bind an attempt before dispatch'
         board_id = conn.execute('SELECT board_id FROM workflow_board').fetchone()[0]
         monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
-        attempt = enroll(conn, task, expected_status='ready', expected_run_id=None,
+        attempt = enroll(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
                          board_id=board_id, spec_digest='a'*64, base_sha='b'*40,
                          target_sha='c'*40, implementer_maker='openai',
                          roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
@@ -24,7 +24,7 @@ def test_enrollment_pins_lineage_and_refuses_legacy_approval(tmp_path, monkeypat
                          compatibility=writer_receipts(conn), decision='synthetic operator decision')
         assert attempt['state'] == 'preflight'
         with pytest.raises(ValueError, match='already enrolled'):
-            enroll(conn, task, expected_status='ready', expected_run_id=None,
+            enroll(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
                    board_id=board_id, spec_digest='d'*64, base_sha='b'*40,
                    target_sha='c'*40, implementer_maker='openai', roster=attempt['roster'],
                    consumed={'rounds':0,'recovery':0,'active_seconds':0},
@@ -43,7 +43,7 @@ def test_exhausted_migration_cannot_dispatch_or_downgrade(tmp_path, monkeypatch)
     path = tmp_path / 'board.db'
     conn = connect(path)
     task = kb.create_task(conn, title='exhausted implementation', assignee='builder')
-    attempt = enroll_review(conn, task, expected_status='ready', expected_run_id=None,
+    attempt = enroll_review(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
@@ -72,7 +72,7 @@ def test_failed_preflight_cannot_native_respawn_or_reset_shared_recovery(tmp_pat
     path = tmp_path / 'board.db'
     conn = connect(path)
     task = kb.create_task(conn, title='finite preflight', assignee='builder')
-    state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
+    state.enroll_review(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],
@@ -107,7 +107,7 @@ def test_running_time_is_charged_but_queue_wait_is_not(tmp_path, monkeypatch):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     conn = connect(tmp_path / 'board.db')
     task = kb.create_task(conn, title='clock', assignee='builder')
-    state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
+    state.enroll_review(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40, implementer_maker='openai',
         roster=['tests','quality','architecture','style','breaker_a','breaker_b','breaker_c','scope'],

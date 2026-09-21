@@ -10,7 +10,7 @@ from tests.hermes_cli.review_readiness_helpers import writer_receipts
 
 
 def enrollment(conn):
-    return dict(expected_status='ready', expected_run_id=None,
+    return dict(expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
         implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),

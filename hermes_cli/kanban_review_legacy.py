@@ -145,6 +145,7 @@ def adjudicate(conn, task_id, receipt):
             args = {k:receipt[k] for k in ('expected_run_id','board_id','spec_digest','base_sha','target_sha',
                     'implementer_maker','roster','consumed','compatibility','decision')}
             args['expected_status'] = kb.get_task(conn,task_id).status
+            args['expected_assignee'] = kb.get_task(conn,task_id).assignee
             args['consumed'] = charged
             result['attempt'] = state.enroll_review(conn, task_id, **args)
             if disposition == 'successor':

@@ -211,7 +211,7 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
     conn = connect(db)
     owner = kb.create_task(conn, title='Reject negative counts; no additional files', assignee='reviewer',
         workspace_kind='dir', workspace_path=str(repo), model_override='openai/gpt-5', provider_override='openrouter')
-    attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None,
+    attempt = state.enroll_review(conn, owner, expected_status='ready', expected_run_id=None, expected_assignee='reviewer',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0], spec_digest='a'*64,
         base_sha=base, target_sha=sha, implementer_maker='openai', roster=sorted(state.REQUIRED_LANES | {'docs', 'system'}),
         consumed={'rounds': 0, 'recovery': 0, 'active_seconds': 0},

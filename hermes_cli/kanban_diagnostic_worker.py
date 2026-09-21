@@ -94,33 +94,11 @@ def before_request(conn, task_id, agent):
         else:
             admitted = admitted and time.time() < run['started_at'] + min(600, run['max_runtime_seconds'] or 600)
         if admitted:
-            _adopt_reserved_launch(conn, task_id, task['current_run_id'])
+            from hermes_cli.kanban_worker_launch import adopt_reserved_launch
+            adopt_reserved_launch(conn, task_id, task['current_run_id'])
     if not admitted:
         raise InterruptedError('diagnostic run or execution deadline no longer admitted')
     if (getattr(agent, '_fallback_chain', None) or getattr(agent, 'is_subagent', False)
             or type(agent.max_iterations) is not int or agent.max_iterations <= 0):
         raise PermissionError('diagnostics require finite non-nested execution without route fallback')
     return True
-
-
-def _adopt_reserved_launch(conn, task_id, run_id):
-    """The child can finish its launch receipt after its dispatcher disappears.
-
-    The board/task/run reservation is already durable at claim. A late child
-    cannot adopt a released run because the caller checked it under this lock.
-    """
-    from hermes_cli import kanban_db as kb
-    from hermes_cli.kanban_db_dispatch import _process_fingerprint
-    run = conn.execute('SELECT worker_pid,claim_lock FROM task_runs WHERE id=?', (run_id,)).fetchone()
-    if run['worker_pid'] is not None:
-        return
-    if not str(run['claim_lock'] or '').startswith(kb._host_prefix()):
-        raise PermissionError('diagnostic launch reservation belongs to another host')
-    pid = os.getpid()
-    fingerprint = _process_fingerprint(pid)
-    if not fingerprint:
-        raise PermissionError('diagnostic process identity unavailable')
-    conn.execute('UPDATE task_runs SET worker_pid=?,worker_started_at=? WHERE id=?', (pid, fingerprint, run_id))
-    conn.execute('UPDATE tasks SET worker_pid=?,worker_started_at=? WHERE id=? AND current_run_id=?',
-                 (pid, fingerprint, task_id, run_id))
-    kb._append_event(conn, task_id, 'spawned', {'pid': pid, 'started_at': fingerprint}, run_id=run_id)

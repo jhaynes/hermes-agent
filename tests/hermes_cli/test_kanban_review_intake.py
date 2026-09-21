@@ -25,6 +25,16 @@ def test_cli_enrollment_reservation_and_worker_guard_round_trip(tmp_path, monkey
     wrapper=argparse.ArgumentParser()
     cli.build_parser(wrapper.add_subparsers(dest='command'))
     args=wrapper.parse_args(['kanban','enroll-review',task,'--receipt',str(file)])
+    assert cli.kanban_command(args) != 0, 'Enrollment without a pinned expected owner must be refused'
+    capsys.readouterr()
+    assert conn.execute('SELECT COUNT(*) FROM review_attempts').fetchone()[0] == 0
+    receipt['expected_assignee'] = 'stale-owner'
+    file.write_text(json.dumps(receipt))
+    assert cli.kanban_command(args) != 0
+    capsys.readouterr()
+    assert conn.execute('SELECT COUNT(*) FROM review_attempts').fetchone()[0] == 0
+    receipt['expected_assignee'] = 'builder'
+    file.write_text(json.dumps(receipt))
     assert cli.kanban_command(args)==0
     enrolled=json.loads(capsys.readouterr().out)
     assert enrolled['spec_digest']==receipt['spec_digest']
@@ -57,7 +67,7 @@ def test_enrollment_snapshots_effective_config_and_disable_preserves_gates(tmp_p
     save_config({'kanban': {'review_feedback': {'rounds': 2, 'recovery': 1, 'active_seconds': 60}}})
     conn = connect(tmp_path / 'board.db')
     def enroll(task):
-        return state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
+        return state.enroll_review(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
             board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
             spec_digest='a'*64, base_sha='b'*40, target_sha='c'*40,
             implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),

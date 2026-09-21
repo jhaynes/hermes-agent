@@ -15,7 +15,7 @@ def test_show_json_and_new_worker_brief_include_pinned_attempt(tmp_path, monkeyp
     monkeypatch.setenv('HERMES_KANBAN_DB',str(path))
     conn=connect(path)
     task=kb.create_task(conn,title='visibility',assignee='builder')
-    attempt=state.enroll_review(conn,task,expected_status='ready',expected_run_id=None,
+    attempt=state.enroll_review(conn,task,expected_status='ready',expected_run_id=None,expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
         base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
         consumed={'rounds':2,'recovery':1,'active_seconds':20},compatibility=writer_receipts(conn),decision='synthetic')
@@ -27,6 +27,14 @@ def test_show_json_and_new_worker_brief_include_pinned_attempt(tmp_path, monkeyp
     assert data.get('workflow',{}).get('attempt',{}).get('id')==attempt['id'], 'Existing show JSON must expose enrollment'
     assert data['workflow']['attempt']['completed_rounds']==2
     assert data['workflow']['attempt']['recovery_used']==1
+    from hermes_cli import kanban_db_dispatch as dispatch
+    dispatch.dispatch_once(conn, max_spawn=0)
+    comments = kb.list_comments(conn, task)
+    assert any(attempt['id'] in item.body and 'Rounds: 2/3' in item.body
+               and 'Recovery: 1/2' in item.body and attempt['target_sha'] in item.body
+               for item in comments), 'Existing dashboard comments must carry the managed parent summary'
+    dispatch.dispatch_once(conn, max_spawn=0)
+    assert len(kb.list_comments(conn, task)) == len(comments), 'Unchanged summary must not spam each tick'
     brief=kb.build_worker_context(conn,task)
     assert attempt['id'] in brief
     assert attempt['policy_digest'] in brief

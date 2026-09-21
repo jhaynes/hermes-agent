@@ -50,6 +50,7 @@ def test_closed_run_with_live_process_is_not_a_safe_boundary(tmp_path, monkeypat
                        'expected_status':observed['status'], 'history_digest':observed['history_digest'],
                        'spec_digest':observed['spec_digest'], 'approved_by':'Justin',
                        'compatibility':writer_receipts(conn),'consumed':{'rounds':1,'recovery':0,'active_seconds':30}}
+            receipt.pop('expected_assignee')  # Legacy admission binds the inspected history.
             with pytest.raises(ValueError,match='physical quiescence'):
                 adjudicate(conn,task,receipt)
             assert state.get_attempt(conn,task) is None
@@ -68,6 +69,7 @@ def test_preserved_conservative_counts_cannot_be_reduced(tmp_path, monkeypatch):
                    'history_digest':observed['history_digest'],'spec_digest':observed['spec_digest'],
                    'approved_by':'Justin','compatibility':None,
                    'consumed':{'rounds':2,'recovery':1,'active_seconds':30}}
+        receipt.pop('expected_assignee')
         adjudicate(conn,task,receipt)
         observed = inspect_history(conn,task)
         receipt.update(disposition='enroll',history_digest=observed['history_digest'],

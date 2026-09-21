@@ -10,7 +10,7 @@ from hermes_cli.kanban_db_connect import connect, write_txn
 
 
 def enroll(conn, task, *, spec='a'*64):
-    return state.enroll_review(conn, task, expected_status='ready', expected_run_id=None,
+    return state.enroll_review(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],
         spec_digest=spec, base_sha='b'*40, target_sha='c'*40,
         implementer_maker='openai', roster=sorted(state.REQUIRED_LANES),

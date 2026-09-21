@@ -45,7 +45,7 @@ def enroll(args):
             result = decide(conn, args.task_id, receipt)
         print(json.dumps(result, sort_keys=True))
         return 0
-    fields={'expected_status','expected_run_id','board_id','spec_digest','base_sha','target_sha',
+    fields={'expected_status','expected_run_id','expected_assignee','board_id','spec_digest','base_sha','target_sha',
             'implementer_maker','roster','consumed','compatibility','decision'}
     if set(receipt)!=fields:
         raise ValueError('enrollment receipt fields do not match the managed review contract')

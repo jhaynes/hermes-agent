@@ -46,6 +46,8 @@ def before_model_request(agent, request):
     with connect_closing(Path(db_path)) as conn:
         from hermes_cli.kanban_diagnostic_worker import before_request
         if before_request(conn, task_id, agent):
+            from hermes_cli.kanban_review_transport import pin_route
+            pin_route(agent)
             return
         member = conn.execute('SELECT * FROM review_members WHERE task_id=?', (task_id,)).fetchone()
         attempt = state.get_attempt(conn, task_id)
@@ -68,10 +70,14 @@ def before_model_request(agent, request):
         action = conn.execute('SELECT deadline FROM review_actions WHERE task_id=? AND run_id=? AND state=\'running\'', (task_id,int(run_id))).fetchone()
         if not action or time.time() >= action['deadline']:
             raise TimeoutError('managed review execution deadline reached')
+        from hermes_cli.kanban_worker_launch import adopt_reserved_launch
+        adopt_reserved_launch(conn, task_id, int(run_id))
         model = request.get('model')
         if ((task['provider_override'] and agent.provider != task['provider_override'])
                 or (task['model_override'] and model != task['model_override'])):
             raise PermissionError('effective model route differs from the reserved reviewer route')
+        from hermes_cli.kanban_review_transport import pin_route
+        pin_route(agent)
         if not member:
             record_runtime_route(conn, task_id, int(run_id), provider=agent.provider, model=model, isolated=False)
             return

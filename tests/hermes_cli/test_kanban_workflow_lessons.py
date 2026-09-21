@@ -9,7 +9,7 @@ from hermes_cli import kanban_db_dispatch as dispatch
 from hermes_cli.kanban_db_connect import connect, write_txn
 
 
-@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent','validator_failure','path_swap','hash_race','recurrence'])
+@pytest.mark.parametrize('attack',[None,'permission','budget','reviewer','other_profile','root_cause','markdown_policy','application_io_failure','crash_after_replace','concurrent','validator_failure','path_swap','hash_race','recurrence','equivalent'])
 def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_path, monkeypatch, attack):
     home=tmp_path/'.hermes'
     home.mkdir()
@@ -167,6 +167,39 @@ print(json.dumps(result))
     assert len(reference.read_bytes().splitlines()) == 1, 'Crash/retry/concurrent apply cannot append twice'
     next_task=kb.create_task(conn,title='subsequent intake',assignee=None)
     assert lesson['id'] in kb.build_worker_context(conn,next_task)
+    if attack == 'equivalent':
+        other = kb.create_task(conn, title='independent timeout evidence', assignee=None)
+        other_run = kb.claim_task(conn, other)
+        assert other_run is not None
+        with write_txn(conn):
+            kb._append_event(conn, other, 'timed_out', {'elapsed_seconds': 15, 'limit_seconds': 10},
+                             run_id=other_run.current_run_id)
+        assert kb.block_task(conn, other, kind='transient', reason='operator recovery',
+                             expected_run_id=other_run.current_run_id)
+        other_incident = dict(conn.execute('SELECT * FROM workflow_incidents WHERE task_id=?', (other,)).fetchone())
+        other_event = json.loads(other_incident['source_events'])[0]
+        dispatch.dispatch_once(conn, spawn_fn=lambda t,w:spawned.append(t), max_spawn=1)
+        other_reporter = spawned[-1]
+        other_report = json.loads(json.dumps(report))
+        other_report.update(incident_id=other_incident['id'], owner=other, citations=[other_event],
+                            facts=[dict(conn.execute('SELECT id,kind,created_at FROM task_events WHERE id=?', (other_event,)).fetchone())])
+        other_report['proposed_change']['record']['source_event'] = other_event
+        assert kb.complete_task(conn, other_reporter.id, expected_run_id=other_reporter.current_run_id,
+                                metadata={'postmortem': other_report})
+        dispatch.dispatch_once(conn, spawn_fn=lambda t,w:spawned.append(t), max_spawn=1)
+        other_validator = spawned[-1]
+        assert kb.complete_task(conn, other_validator.id, expected_run_id=other_validator.current_run_id,
+                                metadata={'lesson_validation': {'source_event': other_event, 'result': 'reproduced'}})
+        before = reference.read_bytes()
+        dispatch.dispatch_once(conn, spawn_fn=lambda *a:None, max_spawn=0)
+        assert reference.read_bytes() == before, 'Equivalent procedure with different source evidence must not append twice'
+        duplicate = conn.execute('SELECT * FROM workflow_lessons WHERE incident_id=?', (other_incident['id'],)).fetchone()
+        assert duplicate['status'] == 'rejected'
+        assert duplicate['validator_run'] == other_validator.current_run_id
+        event_row = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND kind='lesson_equivalent'", (other,)).fetchone()
+        assert json.loads(event_row[0])['equivalent_to'] == lesson['id']
+        conn.close()
+        return
     if attack == 'recurrence':
         assert kb.unblock_task(conn, owner)
         recurrence = kb.claim_task(conn, owner)

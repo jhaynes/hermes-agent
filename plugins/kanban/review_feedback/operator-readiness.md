@@ -57,6 +57,12 @@ predecessor evidence is preserved but does not authorize new readiness.
 
 ## Inspect and decide legacy history
 
+Fresh enrollment receipts must include `expected_assignee` alongside
+`expected_status` and `expected_run_id`. Use the assignee from the supported task
+read, or JSON `null` only for an actually unassigned task. This is an equality
+condition, never a wildcard: a reassignment before enrollment refuses the whole
+transaction. Legacy adjudication retains its history-bound receipt format.
+
 Use the same `enroll-review TASK --receipt FILE` command with:
 
 ```json

@@ -40,7 +40,7 @@ def test_recovery_and_claim_are_atomic_across_processes(tmp_path, monkeypatch):
     path = tmp_path / 'board.db'
     conn = connect(path)
     task = kb.create_task(conn,title='shared recovery',assignee='builder')
-    attempt = state.enroll_review(conn,task,expected_status='ready',expected_run_id=None,
+    attempt = state.enroll_review(conn,task,expected_status='ready',expected_run_id=None,expected_assignee='builder',
         board_id=conn.execute('SELECT board_id FROM workflow_board').fetchone()[0],spec_digest='a'*64,
         base_sha='b'*40,target_sha='c'*40,implementer_maker='openai',roster=sorted(state.REQUIRED_LANES),
         consumed={'rounds':0,'recovery':1,'active_seconds':0},compatibility=writer_receipts(conn),decision='synthetic')
