@@ -1,6 +1,6 @@
 # Staged bounded-review rollout (NOT activated)
 
-These assets are local installation inputs for the authorized parent. They are not a deployment receipt. Do not install, enroll live cards, replace services or commission final independent review until the implementation acceptance ledger has no unresolved implementation requirements.
+These assets are staged installation inputs for an authorized operator. Local implementation and isolated verification are separate from operational rollout. Before installation or enrollment, verify the exact revision's acceptance and independent-review evidence, qualify the installed runtimes, and obtain the applicable operational authorization. This directory is not a deployment receipt and does not activate the workflow.
 
 ## Prepared assets
 
@@ -9,7 +9,7 @@ These assets are local installation inputs for the authorized parent. They are n
 - `bounded-review-feedback.md`: common procedural reference installed beside each patched skill.
 - `verified-procedures.jsonl`: initially empty reference, installed only beside development-lifecycle. Never replace an existing reference with this empty seed.
 
-No credentials or model subscriptions are copied. The profile settings are tested through `create_profile` and `set_config_value` against a temporary home, not against live profiles. The staged full skill texts and before/after hashes are generated separately under the builder worktree's `.hermes/staged-review-skills/`; these are inspection copies, not replacements for unrelated references.
+No credentials or model subscriptions are copied. The profile settings are tested through `create_profile` and `set_config_value` against a temporary home, not against live profiles. Generate inspection copies and before/after hashes when preparing the exact skill patches; those copies are not replacements for unrelated references.
 
 ## Supported parent setup, after readiness
 
@@ -55,13 +55,23 @@ The fixture's basic specialist probes do not replace production specialist revie
 
 `test_kanban_review_worker_live.py` separately exercises actual implementer routing,
 opposite-maker reviewers, mismatches and revocation before an outer transport retry.
-These checks do not yet establish enforcement at every possible SDK retry,
-reconnect, custom transport or client replacement boundary. Do not claim that
-toolset selection or prompt wording supplies a filesystem/network sandbox.
+`test_kanban_review_native_transport.py` additionally exercises supported native
+Responses and summary-send boundaries, including reconnect admission. Managed
+shared-client routes require zero SDK retries; unsupported retry settings fail
+closed. These local fixtures do not attest live providers or arbitrary custom
+transports. Toolset selection and prompt wording do not supply a filesystem/network
+sandbox.
 
-## Known readiness limits
+## Operational readiness limits
 
-Read `.hermes/review-feedback-acceptance.json` and `.hermes/review-feedback-run3-result.json` in the builder worktree for exact-SHA evidence and remaining requirements; earlier result files preserve runs 1 and 2. The staged commands above are not evidence that live setup, sandbox enforcement, independent review, runtime compatibility, publication or deployment occurred.
+Use the tracked [writer readiness and legacy-history adoption guide](operator-readiness.md)
+and [diagnostic workflow guide](diagnostics.md) for the supported contracts. Release
+verification must identify the exact tested and independently reviewed revision;
+private builder logs and intermediate run reports are not prerequisites for reading
+or using this documentation. Passing isolated tests does not establish installed
+runtime compatibility, live provider qualification, profile/skill installation, or
+completion of the report-only operational pilot. Those rollout gates remain
+separate from local implementation and code review.
 
 ## Operator decision receipts (isolated implementation only)
 
@@ -100,7 +110,7 @@ The three-integer compatibility assertion is now refused. See
 [writer readiness and legacy-history adoption](operator-readiness.md) for the
 supported challenge/receipt flow and explicit legacy choices. These isolated
 implementation paths do not attest installed live services or authorize rollout.
-The full build still has outstanding acceptance in the canonical ledger.
+Operational adoption still requires the runtime and history checks described there.
 
 ## Typed lane evidence
 
