@@ -72,7 +72,8 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
     thread.start()
     (profile / 'config.yaml').write_text(json.dumps({
         'model':{'provider':'openrouter','default':'anthropic/claude-sonnet-4-5','base_url':f'http://127.0.0.1:{server.server_port}/v1'},
-        'agent':{'max_turns':1}, 'toolsets':[], 'memory':{'memory_enabled':False,'user_profile_enabled':False},
+        'agent':{'max_turns':1, 'api_max_retries':1, 'auto_recovery_cycles':0},
+        'toolsets':[], 'memory':{'memory_enabled':False,'user_profile_enabled':False},
         'display':{'streaming':False}, 'terminal':{'backend':'local'},
     }))
     (profile / '.env').write_text('OPENROUTER_API_KEY=synthetic-local-only\n')
@@ -149,7 +150,7 @@ def test_normal_dispatch_worker_records_resolved_route(tmp_path, monkeypatch, im
         if revoke == 'route':
             assert not calls, 'Client replacement after preparation must send zero requests'
             log=(kb.worker_logs_dir()/f'{task_id}.log').read_text()
-            assert 'managed transport route changed after admission' in log
+            assert 'managed transport route changed after admission' in log, log
         elif refused:
             assert not calls, 'Same-maker worker must send zero model requests'
             assert route is None or route['maker'] is None
