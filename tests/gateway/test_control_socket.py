@@ -385,10 +385,26 @@ def test_collect_fleet_versions_falls_back_to_state_file(tmp_path: Path, monkeyp
     monkeypatch.setattr(
         "gateway.status.live_gateway_pid_for_home", lambda h: os.getpid()
     )
+    # A shared-venv pytest executable need not belong to the checkout under test.
+    # Pin the gateway's provenance independently of this test runner's process.
+    checkout = tmp_path / "checkout"
+    monkeypatch.setattr(ur, "_updater_code_root", lambda: checkout)
+    monkeypatch.setattr(ur, "_gateway_code_root", lambda pid, h: checkout)
     fleet = ur.collect_fleet_versions()
     assert len(fleet) == 1
     assert fleet[0]["state"] == "stale"
     assert fleet[0]["code_sha"] == "OLDSHA"
+    assert "source" not in fleet[0]
+
+    # A verified gateway in a different checkout must still be external,
+    # even when its stamped SHA differs from the updater's.
+    other_checkout = tmp_path / "other-checkout"
+    monkeypatch.setattr(ur, "_gateway_code_root", lambda pid, h: other_checkout)
+    fleet = ur.collect_fleet_versions()
+    assert len(fleet) == 1
+    assert fleet[0]["state"] == "external"
+    assert fleet[0]["code_sha"] == "OLDSHA"
+    assert fleet[0]["code_root"] == str(other_checkout)
     assert "source" not in fleet[0]
 
 
