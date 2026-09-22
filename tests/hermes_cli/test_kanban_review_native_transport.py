@@ -81,6 +81,8 @@ def test_shared_native_send_rechecks_admission(tmp_path, monkeypatch, mode, chan
         max_iterations=2, _interrupt_requested=False, session_id='', _force_ascii_payload=False,
         _ensure_primary_openai_client=lambda **kw:client, _client_log_context=lambda:'synthetic',
         _touch_activity=lambda *a:None, _fire_stream_delta=lambda *a:None,
+        _fire_reasoning_delta=lambda *a:None,
+        _buffer_diagnostic_status=lambda *a:None,
         _build_api_kwargs=lambda messages:{'model':'gpt-5', 'messages':messages} if mode == 'chat_summary' else {'model':'gpt-5','input':messages},
         _get_transport=lambda:SimpleNamespace(normalize_response=lambda response, **kw:SimpleNamespace(content='ok', tool_calls=[])))
     agent._run_codex_stream = lambda kwargs:run_codex_stream(agent, kwargs)
