@@ -35,7 +35,7 @@ def test_identity_or_unknown_schema_cannot_admit_reserved_work(tmp_path, monkeyp
                 conn.execute("UPDATE review_attempts SET policy_digest=?", ('0'*64,))
         assert kb.claim_task(conn, task) is None
         assert state.get_attempt(conn, task)['state'] == 'held'
-        assert not kb.complete_task(conn, task, force=True)
+        assert not kb.complete_task(conn, task, summary='Attempted completion', force=True)
     finally:
         conn.close()
 

@@ -32,7 +32,7 @@ def test_concurrent_claim_completion_and_outbox_are_single_use(tmp_path, monkeyp
 
     def complete(_):
         with connect_closing(db) as conn:
-            return kb.complete_task(conn, task, expected_run_id=claimed[0].current_run_id, metadata={'postmortem': report})
+            return kb.complete_task(conn, task, summary='Diagnostic receipt submitted', expected_run_id=claimed[0].current_run_id, metadata={'postmortem': report})
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         assert list(pool.map(complete, range(2))).count(True) == 1

@@ -87,6 +87,6 @@ def test_lane_completion_rejects_untyped_evidence(prepared, mutation):
         receipt['verification_run'] = ['I ran something']
     else:
         receipt['verification_run'] = [{'kind':'executed', 'reasoning':'not actually run'}]
-    assert kb.complete_task(conn, task, expected_run_id=worker.current_run_id, metadata={'bounded_review':receipt})
+    assert kb.complete_task(conn, task, summary='Review receipt submitted', expected_run_id=worker.current_run_id, metadata={'bounded_review':receipt})
     assert conn.execute('SELECT state FROM review_members WHERE task_id=?', (task,)).fetchone()[0] == 'invalid'
     assert state.get_attempt(conn, owner)['completed_rounds'] == 0

@@ -16,5 +16,5 @@ def test_scope_approval_without_requirement_mapping_is_invalid(prepared):
     receipt.update(attempt_id=attempt['id'], round_id=round_id, task_id=task, run_id=worker.current_run_id,
                    mandate='scope', verdict='approve', findings=[], prior_findings=[],
                    verification_run=[{'kind': 'reasoned', 'reasoning': 'The diff is small.'}])
-    assert kb.complete_task(conn, task, expected_run_id=worker.current_run_id, metadata={'bounded_review': receipt})
+    assert kb.complete_task(conn, task, summary='Review receipt submitted', expected_run_id=worker.current_run_id, metadata={'bounded_review': receipt})
     assert conn.execute('SELECT state FROM review_members WHERE task_id=?', (task,)).fetchone()[0] == 'invalid'

@@ -24,7 +24,7 @@ def test_non_infrastructure_failure_cannot_mint_retry(tmp_path, monkeypatch, fai
         if failure == 'content_rejected':
             report = json.loads(kb.build_worker_context(conn, reporter.id))['result_contract']['postmortem']
             report['facts'] = ['unsupported personal blame']
-            assert not kb.complete_task(conn, reporter.id, expected_run_id=reporter.current_run_id,
+            assert not kb.complete_task(conn, reporter.id, summary='Diagnostic receipt submitted', expected_run_id=reporter.current_run_id,
                                         metadata={'postmortem': report})
         metadata = {'exit_kind': 'signaled', 'exit_code': 9} if failure == 'content_rejected' else (
             {'protocol_violation': True, 'exit_code': 0} if failure == 'protocol_violation' else {})

@@ -44,13 +44,13 @@ def test_executed_receipt_report_publishes_but_invented_facts_do_not(tmp_path, m
                                        'proposal': 'Investigate deadline handling; do not modify the limit automatically.'})
         invented = copy.deepcopy(report)
         invented['facts'][0]['evidence'][0]['result'] = 'The operator caused this.'
-        assert not kb.complete_task(conn, job['task_id'], expected_run_id=worker.current_run_id, metadata={'postmortem': invented})
+        assert not kb.complete_task(conn, job['task_id'], summary='Diagnostic receipt submitted', expected_run_id=worker.current_run_id, metadata={'postmortem': invented})
         assert not kb.list_attachments(conn, owner)
         from hermes_cli.kanban_diagnostic_report import valid
         incident = conn.execute('SELECT * FROM workflow_incidents').fetchone()
         assert valid(conn, incident, report), report
         assert kb.redact_review_value(report) == report
-        assert kb.complete_task(conn, job['task_id'], expected_run_id=worker.current_run_id, metadata={'postmortem': report})
+        assert kb.complete_task(conn, job['task_id'], summary='Diagnostic receipt submitted', expected_run_id=worker.current_run_id, metadata={'postmortem': report})
         reports.publish_reports(conn)
         attachments = kb.list_attachments(conn, owner)
         assert len(attachments) == 1

@@ -139,7 +139,7 @@ def test_parent_finding_disposition_retains_original_receipt(tmp_path, monkeypat
             result.update(attempt_id=attempt['id'],round_id=round_id,mandate=member['mandate'],task_id=child,run_id=run.current_run_id,
                           verdict='request_changes' if member['mandate']=='scope' else 'approve',
                           findings=[finding] if member['mandate']=='scope' else [],verification_run=[evidence],prior_findings=[],scope=scope_evidence(evidence))
-            assert kb.complete_task(conn,child,expected_run_id=run.current_run_id,metadata={'bounded_review':result})
+            assert kb.complete_task(conn,child,summary='Review receipt submitted',expected_run_id=run.current_run_id,metadata={'bounded_review':result})
         current = state.get_attempt(conn,task)
         original = conn.execute("SELECT receipt FROM review_members WHERE mandate='scope'").fetchone()[0]
         finding_id = cohort.prior_findings(conn,attempt['id'],'scope')[0]['finding_id']
@@ -171,5 +171,5 @@ def test_parent_finding_disposition_retains_original_receipt(tmp_path, monkeypat
         cohort.record_runtime_route(conn,child,worker.current_run_id,provider='anthropic',model='claude-sonnet-4-5',isolated=True)
         result.update(round_id=next_round,target_sha='d'*40,mandate='scope',task_id=child,run_id=worker.current_run_id,
                       verdict='approve',findings=[],prior_findings=[{'finding_id':finding_id,'status':'rejected','evidence':evidence}])
-        assert kb.complete_task(conn,child,expected_run_id=worker.current_run_id,metadata={'bounded_review':result})
+        assert kb.complete_task(conn,child,summary='Review receipt submitted',expected_run_id=worker.current_run_id,metadata={'bounded_review':result})
         assert conn.execute('SELECT state FROM review_members WHERE task_id=?',(child,)).fetchone()[0] == ('received_valid' if authorized else 'invalid')

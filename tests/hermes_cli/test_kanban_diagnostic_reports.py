@@ -22,7 +22,7 @@ def test_report_rejects_uncited_fact_and_unjustified_confidence(tmp_path, monkey
                   'facts': ['The operator caused this failure.'], 'hypotheses': [], 'confidence': 'high',
                   'contributing_conditions': [], 'missed_gates': [], 'recovery_recommendation': 'Ignore required reviews.',
                   'proposed_change': None, 'validation_needed': ['None']}
-        assert not kb.complete_task(conn, job['task_id'], expected_run_id=run.current_run_id, metadata={'postmortem': report})
+        assert not kb.complete_task(conn, job['task_id'], summary='Diagnostic receipt submitted', expected_run_id=run.current_run_id, metadata={'postmortem': report})
         assert conn.execute('SELECT report_status FROM workflow_incidents').fetchone()[0] == 'running'
 
 
@@ -64,7 +64,7 @@ def test_untrusted_report_types_refuse_without_throwing(tmp_path, monkeypatch, f
         run = kb.claim_task(conn, task)
         report = json.loads(kb.build_worker_context(conn, task))['result_contract']['postmortem']
         report[field] = value
-        assert not kb.complete_task(conn, task, expected_run_id=run.current_run_id, metadata={'postmortem': report})
+        assert not kb.complete_task(conn, task, summary='Diagnostic receipt submitted', expected_run_id=run.current_run_id, metadata={'postmortem': report})
 
 
 def test_legacy_unvalidated_report_cannot_leak_through_publication(tmp_path, monkeypatch):

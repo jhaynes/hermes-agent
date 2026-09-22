@@ -49,10 +49,10 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
                    'policy_digest':attempt['policy_digest'],'spec_digest':attempt['spec_digest'],
                    'mandate':card['mandate'],'verdict':'request_changes' if findings else 'approve',
                    'findings':findings,'verification_run':[{'kind':'reasoned','reasoning':'synthetic unit-test review'}], 'prior_findings':[], 'scope':scope_evidence()}
-        assert kb.complete_task(conn, card['task_id'], expected_run_id=lane_run.current_run_id,
+        assert kb.complete_task(conn, card['task_id'], summary='Review receipt submitted', expected_run_id=lane_run.current_run_id,
                                 metadata={'bounded_review':receipt})
         if card['mandate'] != 'scope':
-            assert not kb.complete_task(conn, owner, force=True)
+            assert not kb.complete_task(conn, owner, summary='Attempted completion', force=True)
     final = state.get_attempt(conn, owner)
     if consumed == 0:
         assert final['completed_rounds'] == 1
@@ -71,7 +71,7 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
         assert updated['state'] == 'preflight'
         assert updated['target_sha'] == 'd'*40
         assert updated['completed_rounds'] == 1
-        assert not kb.complete_task(conn, owner, force=True)
+        assert not kb.complete_task(conn, owner, summary='Attempted completion', force=True)
         state.reserve_action(conn,owner,category='preflight',expected_version=updated['version'])
         preflight=kb.claim_review_task(conn,owner)
         assert preflight is not None
@@ -84,7 +84,7 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
         cohort.record_runtime_route(conn,scope,scope_run.current_run_id,provider='anthropic',model='claude-sonnet-4-5',isolated=True)
         incomplete={**receipt,'round_id':next_round,'task_id':scope,'run_id':scope_run.current_run_id,
                     'target_sha':'d'*40,'verdict':'approve','findings':[],'prior_findings':[]}
-        assert kb.complete_task(conn,scope,expected_run_id=scope_run.current_run_id,metadata={'bounded_review':incomplete})
+        assert kb.complete_task(conn,scope,summary='Review receipt submitted',expected_run_id=scope_run.current_run_id,metadata={'bounded_review':incomplete})
         assert conn.execute('SELECT state FROM review_members WHERE task_id=?',(scope,)).fetchone()[0]=='invalid', 'Prior accepted findings require explicit re-attack closure evidence'
         conn.close()
         return
@@ -101,7 +101,7 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
     assert cohort.start_cohort(conn, owner, lanes=lanes, expected_version=final['version']) is None
     # These synthetic SHAs exercise cohort aggregation, not a real Git target.
     # Actual positive owner completion is covered by test_kanban_review_snapshot.
-    assert not kb.complete_task(conn, owner, force=True)
+    assert not kb.complete_task(conn, owner, summary='Attempted completion', force=True)
     conn.close()
 
 

@@ -265,7 +265,7 @@ def test_real_cohort_repair_scope_trim_and_clean_third_round(tmp_path, monkeypat
             assert current['completed_rounds'] == ordinal
             if ordinal == 3:
                 assert current['state'] == ('approved' if clean_third else 'held')
-                assert kb.complete_task(conn, owner, force=True) is clean_third
+                assert kb.complete_task(conn, owner, summary='Attempted completion', force=True) is clean_third
                 assert cohort.start_cohort(conn, owner, lanes=lanes, expected_version=current['version']) is None
                 assert not dispatch.dispatch_once(conn, max_spawn=1).spawned
                 break

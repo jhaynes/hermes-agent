@@ -44,7 +44,7 @@ def test_closed_run_with_live_process_is_not_a_safe_boundary(tmp_path, monkeypat
             task = kb.create_task(conn,title='finishing process',assignee='builder')
             run = kb.claim_task(conn,task)
             _set_worker_pid(conn,task,worker.pid)
-            assert kb.complete_task(conn,task,expected_run_id=run.current_run_id)
+            assert kb.complete_task(conn,task,summary='Legacy owner finished',expected_run_id=run.current_run_id)
             observed = inspect_history(conn,task)
             receipt = {**enrollment(conn), 'operation':'legacy-history','disposition':'enroll',
                        'expected_status':observed['status'], 'history_digest':observed['history_digest'],

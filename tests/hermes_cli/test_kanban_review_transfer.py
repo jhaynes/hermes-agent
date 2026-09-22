@@ -41,7 +41,7 @@ def test_managed_export_import_preserves_history_but_not_launch_authority(tmp_pa
         assert copy['active_seconds'] >= 100
         assert kb.get_task(clone, owner).current_run_id is None
         assert kb.claim_task(clone, owner) is None
-        assert not kb.complete_task(clone, owner, force=True)
+        assert not kb.complete_task(clone, owner, summary='Attempted completion', force=True)
         assert not clone.execute("SELECT 1 FROM review_actions WHERE state IN ('running','reserved')").fetchone()
     with connect_closing(board='source') as original:
         assert state.get_attempt(original, owner)['state'] == 'preflight'

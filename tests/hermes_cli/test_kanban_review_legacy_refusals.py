@@ -51,7 +51,7 @@ def test_legacy_admission_refusals_and_exhaustion_are_atomic(tmp_path, monkeypat
             assert result == 0
             assert state.get_attempt(conn,task)['state'] == 'held'
             assert kb.claim_task(conn,task) is None
-            assert not kb.complete_task(conn,task,force=True)
+            assert not kb.complete_task(conn,task,summary='Attempted completion',force=True)
         else:
             assert result != 0
             assert state.get_attempt(conn,task) is None

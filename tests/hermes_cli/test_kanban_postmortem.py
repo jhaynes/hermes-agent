@@ -59,7 +59,7 @@ def test_completed_report_is_cited_redacted_and_attached_without_resolving_owner
     if publication_crash == 'stale_run':
         dispatch._record_task_failure(conn, reporter.id, 'synthetic crash', outcome='crashed',
                                      release_claim=True, end_run=True, failure_limit=100)
-        assert not kb.complete_task(conn, reporter.id, expected_run_id=reporter.current_run_id, metadata={'postmortem': report})
+        assert not kb.complete_task(conn, reporter.id, summary='Diagnostic receipt submitted', expected_run_id=reporter.current_run_id, metadata={'postmortem': report})
         assert conn.execute('SELECT report_status FROM workflow_incidents').fetchone()[0] == 'synthesis_failed'
         conn.close()
         return

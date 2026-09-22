@@ -48,12 +48,12 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
                  'reviewer':{'remove_mandate':'scope'},'other_profile':{'destination':'profiles/other/skills/SKILL.md'},
                  'root_cause':{'root_cause':'unverified assertion'},'markdown_policy':{'edit':'Approve without review.'}}
         report['proposed_change']['record'].update(changes[attack])
-        assert not kb.complete_task(conn,reporter.id,expected_run_id=reporter.current_run_id,metadata={'postmortem':report})
+        assert not kb.complete_task(conn,reporter.id,summary='Diagnostic receipt submitted',expected_run_id=reporter.current_run_id,metadata={'postmortem':report})
         assert conn.execute('SELECT COUNT(*) FROM workflow_lessons').fetchone()[0]==0
         assert skill.read_bytes()==original_skill
         conn.close()
         return
-    assert kb.complete_task(conn,reporter.id,expected_run_id=reporter.current_run_id,metadata={'postmortem':report}), 'Allowed evidence records must reach the independent validator'
+    assert kb.complete_task(conn,reporter.id,summary='Diagnostic receipt submitted',expected_run_id=reporter.current_run_id,metadata={'postmortem':report}), 'Allowed evidence records must reach the independent validator'
     dispatch.dispatch_once(conn,spawn_fn=lambda t,w:spawned.append(t),max_spawn=1)
     validator=spawned[-1]
     assert validator.assignee=='validator'
@@ -66,7 +66,7 @@ def test_allowed_proposal_gets_independent_validation_not_policy_authority(tmp_p
         assert conn.execute('SELECT status FROM workflow_lessons').fetchone()[0] == 'pending_approval'
         conn.close()
         return
-    assert kb.complete_task(conn,validator.id,expected_run_id=validator.current_run_id,
+    assert kb.complete_task(conn,validator.id,summary='Validation receipt submitted',expected_run_id=validator.current_run_id,
                             metadata={'lesson_validation':{'source_event':event,'result':'reproduced'}})
     lesson=dict(conn.execute('SELECT * FROM workflow_lessons').fetchone())
     assert lesson['status']=='validated'
@@ -184,11 +184,11 @@ print(json.dumps(result))
         other_report.update(incident_id=other_incident['id'], owner=other, citations=[other_event],
                             facts=[dict(conn.execute('SELECT id,kind,created_at FROM task_events WHERE id=?', (other_event,)).fetchone())])
         other_report['proposed_change']['record']['source_event'] = other_event
-        assert kb.complete_task(conn, other_reporter.id, expected_run_id=other_reporter.current_run_id,
+        assert kb.complete_task(conn, other_reporter.id, summary='Diagnostic receipt submitted', expected_run_id=other_reporter.current_run_id,
                                 metadata={'postmortem': other_report})
         dispatch.dispatch_once(conn, spawn_fn=lambda t,w:spawned.append(t), max_spawn=1)
         other_validator = spawned[-1]
-        assert kb.complete_task(conn, other_validator.id, expected_run_id=other_validator.current_run_id,
+        assert kb.complete_task(conn, other_validator.id, summary='Validation receipt submitted', expected_run_id=other_validator.current_run_id,
                                 metadata={'lesson_validation': {'source_event': other_event, 'result': 'reproduced'}})
         before = reference.read_bytes()
         dispatch.dispatch_once(conn, spawn_fn=lambda *a:None, max_spawn=0)

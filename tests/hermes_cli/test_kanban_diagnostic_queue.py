@@ -54,7 +54,7 @@ def test_existing_priority_queue_cannot_guarantee_finite_diagnostic_service(tmp_
             dispatch.dispatch_once(conn, spawn_fn=lambda t, w: spawned.append(t), max_spawn=1,
                                    max_in_progress_per_profile=1)
             assert [task.id for task in spawned] == [builder]
-            assert kb.complete_task(conn, builder, expected_run_id=spawned[0].current_run_id)
+            assert kb.complete_task(conn, builder, summary='Synthetic builder finished', expected_run_id=spawned[0].current_run_id)
         diagnostic = conn.execute('SELECT task_id,runs_started FROM workflow_postmortems').fetchone()
         assert diagnostic['runs_started'] == 0
         assert kb.get_task(conn, diagnostic['task_id']).status == 'ready'

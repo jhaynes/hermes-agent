@@ -70,7 +70,7 @@ def test_expired_lane_completion_cannot_approve_or_accept_evidence(tmp_path, mon
                        task_id=task, run_id=run.current_run_id, verdict='approve', findings=[],
                        verification_run=[{'kind':'reasoned','reasoning':'synthetic clock unit test'}], prior_findings=[])
         now[0] += 11
-        assert not kb.complete_task(conn, task, expected_run_id=run.current_run_id,
+        assert not kb.complete_task(conn, task, summary='Review receipt submitted', expected_run_id=run.current_run_id,
                                     metadata={'bounded_review': receipt}), 'Expired evidence must not become a valid lane'
         assert state.get_attempt(conn, owner)['state'] == 'held'
         assert conn.execute('SELECT receipt FROM review_members WHERE task_id=?', (task,)).fetchone()[0] is None
@@ -136,7 +136,7 @@ def test_managed_deadline_overrides_terminal_worker_grace(tmp_path, monkeypatch)
         receipt.update(attempt_id=attempt['id'], round_id=member['round_id'], mandate=member['mandate'],
                        task_id=task, run_id=run, verdict='approve', findings=[],
                        verification_run=[{'kind':'reasoned','reasoning':'synthetic terminal worker probe'}], prior_findings=[])
-        assert kb.complete_task(conn, task, expected_run_id=run, metadata={'bounded_review':receipt})
+        assert kb.complete_task(conn, task, summary='Review receipt submitted', expected_run_id=run, metadata={'bounded_review':receipt})
         assert processes[0].poll() is None
         now[0] += 11
         dispatch.reap_terminal_workers(conn)

@@ -55,7 +55,7 @@ def test_exhausted_migration_cannot_dispatch_or_downgrade(tmp_path, monkeypatch)
     spawns = []
     dispatch.dispatch_once(conn, spawn_fn=lambda *a: spawns.append(a), max_spawn=1)
     assert spawns == []
-    assert not kb.complete_task(conn, task, force=True)
+    assert not kb.complete_task(conn, task, summary='Attempted completion', force=True)
     # Old runtime fixture has no registered workflow capability, even if it can
     # write ordinary legacy rows. Persisted guard must survive code downgrade.
     old = sqlite3.connect(path)

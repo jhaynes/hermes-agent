@@ -62,7 +62,7 @@ def test_two_profile_scopes_keep_incidents_counters_and_lessons_separate(tmp_pat
                         'proposed_change':{'kind':'procedural_evidence','approval_required':False,'record':{
                             'procedure_id':'record-worker-deadline','failure_shape':'worker-timeout','source_event':event,
                             'required_evidence':['elapsed_seconds','limit_seconds'],'invocation':'hermes kanban runs <task-id> --json'}}}
-                    assert kb.complete_task(conn,reporter.id,expected_run_id=reporter.current_run_id,metadata={'postmortem':report})
+                    assert kb.complete_task(conn,reporter.id,summary='Diagnostic receipt submitted',expected_run_id=reporter.current_run_id,metadata={'postmortem':report})
                 else:
                     assert conn.execute('SELECT COUNT(*) FROM workflow_lessons').fetchone()[0]==0
                 conn.close()

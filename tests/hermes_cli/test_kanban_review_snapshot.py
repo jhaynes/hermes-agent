@@ -48,14 +48,14 @@ def test_completion_checks_actual_approved_snapshot(tmp_path, monkeypatch, mutat
             receipt.update(attempt_id=attempt['id'], round_id=member['round_id'], mandate=member['mandate'],
                            task_id=task, run_id=run.current_run_id, verdict='approve', findings=[],
                            verification_run=[{'kind':'reasoned','reasoning':'synthetic completion-gate unit test'}], prior_findings=[], scope=scope_evidence())
-            assert kb.complete_task(conn, task, expected_run_id=run.current_run_id, metadata={'bounded_review': receipt})
+            assert kb.complete_task(conn, task, summary='Review receipt submitted', expected_run_id=run.current_run_id, metadata={'bounded_review': receipt})
         assert state.get_attempt(conn, owner)['state'] == 'approved'
         if mutation != 'none':
             source.write_text('unreviewed extra behavior\n')
             if mutation == 'new_commit':
                 git('add', '.')
                 git('-c', 'user.name=Synthetic', '-c', 'user.email=synthetic@example.invalid', 'commit', '-qm', 'unreviewed')
-        assert kb.complete_task(conn, owner, force=True) is (mutation == 'none'), 'Force cannot inherit stale approval'
+        assert kb.complete_task(conn, owner, summary='Attempted completion', force=True) is (mutation == 'none'), 'Force cannot inherit stale approval'
         if mutation != 'none':
             assert state.get_attempt(conn, owner)['state'] == 'held'
             assert source.read_text() == 'unreviewed extra behavior\n', 'Hold must preserve unique work'
