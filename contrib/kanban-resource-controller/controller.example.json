@@ -1,0 +1,7 @@
+{
+  "source": "/ABSOLUTE/PATH/TO/retained-hermes-source",
+  "python": "/ABSOLUTE/PATH/TO/retained-hermes-source/venv/bin/python",
+  "home": "/ABSOLUTE/PATH/TO/default-hermes-home",
+  "user_home": "/ABSOLUTE/PATH/TO/user-home",
+  "state": "/ABSOLUTE/PATH/TO/operations/kanban-resource-controller/state"
+}
