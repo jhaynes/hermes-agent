@@ -21,6 +21,16 @@ def ingest_card(card, manifest, journal):
     if (task.get('id') != manifest['task_id'] or task.get('status') != 'done'
             or run.get('outcome') != 'completed' or type(run.get('id')) is not int):
         errors.append('card/run identity or completion mismatch')
+    validation = validate_submission(metadata, manifest, journal, run.get('id'))
+    errors.extend(validation['errors'])
+    return {'state': 'invalid' if errors else 'received_valid', 'errors': errors}
+
+
+def validate_submission(metadata, manifest, journal, run_id):
+    """Validate the exact metadata before handing that same object to completion."""
+    errors = []
+    if not isinstance(metadata, dict):
+        return {'state': 'invalid', 'errors': ['missing structured metadata']}
     for key, value in (('mandate', manifest['lane']), ('base_sha', manifest['base']),
                        ('reviewed_sha', manifest['sha'])):
         if metadata.get(key) != value:
@@ -38,7 +48,8 @@ def ingest_card(card, manifest, journal):
         errors.append('missing typed verification')
     closures = metadata.get('prior_findings')
     if not isinstance(closures, list) or not all(
-        isinstance(c, dict) and isinstance(c.get('finding_id'), str)
+        isinstance(c, dict) and set(c) == {'finding_id', 'status', 'evidence'}
+        and isinstance(c.get('finding_id'), str)
         and c.get('status') in ('open', 'closed', 'rejected') and evidence_valid(c.get('evidence'))
         for c in closures
     ):
@@ -48,6 +59,16 @@ def ingest_card(card, manifest, journal):
             errors.append('missing or duplicate prior findings')
         if verdict == 'approve' and any(c['status'] == 'open' for c in closures):
             errors.append('approve leaves prior findings open')
+    route = metadata.get('effective_route')
+    if (not isinstance(route, dict) or set(route) != {'provider', 'model', 'maker'}
+            or not all(isinstance(v, str) and v.strip() for v in route.values())):
+        errors.append('missing typed effective_route (provider, model, maker)')
+    for key in ('worker_session_id', 'tracking_status'):
+        if not isinstance(metadata.get(key), str) or not metadata[key].strip():
+            errors.append('missing typed ' + key)
+    if not isinstance(metadata.get('limitations'), list) or not all(
+            isinstance(item, str) and item.strip() for item in metadata['limitations']):
+        errors.append('limitations must be an array of nonempty strings')
     if not isinstance(journal, list) or len(journal) < len(manifest['commands']):
         errors.append('missing command receipts')
         journal = journal if isinstance(journal, list) else []
@@ -62,9 +83,13 @@ def ingest_card(card, manifest, journal):
         if not isinstance(identity, dict) or any(identity.get(k) != v for k, v in expected_identity.items()):
             errors.append('command snapshot mismatch')
         if (receipt.get('lane') != manifest['lane'] or receipt.get('task_id') != manifest['task_id']
-                or receipt.get('run_id') != run.get('id') or receipt.get('clean') is not True
-                or type(receipt.get('exit_code')) is not int or receipt['exit_code'] != 0):
-            errors.append('command failed or belongs to another lane/run')
+                or receipt.get('run_id') != run_id or receipt.get('clean') is not True
+                or type(receipt.get('exit_code')) is not int):
+            errors.append('malformed command or belongs to another lane/run')
+        if receipt.get('exit_code') != 0 and verdict == 'approve':
+            errors.append('approve contradicts failed command')
+        if receipt.get('exit_code') != 0 and receipt.get('command') == manifest['commands'][0]:
+            errors.append('identity command failed')
         started, finished = receipt.get('started'), receipt.get('finished')
         if not (type(started) in (int, float) and type(finished) in (int, float)
                 and previous_finish <= started <= finished <= manifest['deadline']):
