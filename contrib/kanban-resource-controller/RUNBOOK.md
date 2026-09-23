@@ -1,48 +1,148 @@
-# Operational runbook — NOT AUTHORIZED FOR THIS TASK
+# Operational runbook — unactivated artifact
 
-All steps below are a future release-owner procedure. This implementation task performed none of them.
+## Status and authority boundary
 
-## Preconditions
+This document is a future release-owner procedure. The build, verification, and packaging tasks did **not** install the helper, change Hermes configuration, alter a service, load a LaunchAgent, dispatch or decompose production work, clear or create Hermes ESTOP, remove a package, activate the unreleased load-adaptive branch, or run a production canary.
 
-1. Review the exact frozen commit, cumulative diff from `5910de20bc9839fdd36e791a9d72ba2c2e722f66`, requirement matrix, and serial receipts. Dedicated `reviewscope` approval is mandatory.
-2. Resolve B-003 by explicitly setting/approving `kanban.dispatch_stale_timeout_seconds: 0`, or add separately approved supported CLI parity. The helper refuses the current nonzero default.
-3. Perform the separately authorized Darwin launchd coalition canary (B-004). A detached/session-leader process is not proof that `launchctl bootout` preserves descendants.
-4. Recheck all discovered boards in SQLite read-only mode for null/blank `notifier_profile` (B-005). Any such row blocks rollout; do not rewrite ownership in this helper.
-5. Prove all old gateway dispatcher processes are stopped, not merely configured off. Prove canonical worker/run/process ancestry and drain before service changes.
-6. Take consistent SQLite backups and config/plist receipts with 0600 files in a 0700 directory. Preserve prior unset values exactly.
+Reading or reviewing this runbook is not authorization to execute it. The following require separate, explicit release-owner authorization at the time of execution:
 
-## Staged installation (separately authorized)
+- production read-only discovery and compatibility receipts;
+- the isolated Darwin launchd coalition canary;
+- any production config, installation, service, or package change;
+- any live zero-start check against production state;
+- activation, production dispatch/decomposition, or ESTOP transition;
+- rollback that changes production config or services.
 
-1. Copy the frozen artifact to a versioned per-user operations directory outside installed Hermes source, e.g. `$HERMES_HOME/operations/kanban-resource-controller/<sha>/`.
-2. Create runtime state in a separate 0700 operations state directory. Create `controller.json` as 0600 using `controller.example.json`; replace every placeholder with an absolute path and the reviewed source SHA.
-3. Confirm the retained Python environment imports `psutil` and `yaml`. Do not install or remove packages during cutover.
-4. Set the approved default-profile values through supported `hermes config set`; make no named-profile changes. Keep the existing maintenance ESTOP unchanged during drain.
-5. Use `check` first. It must report current live pressure honestly, source/config/schema compatibility, exact workers, and zero unowned subscriptions. Fixture recovery is not live recovery proof.
-6. Install the reviewed plist only after B-004. Replace placeholders with absolute paths. Do not load it while the old gateway owns `.dispatcher.lock` or has dispatcher capability live.
+Smithers #2041 is separate, backlog-only work and is not part of this artifact or runbook.
 
-## Canary
+## Frozen inputs and prerequisites
 
-Use an isolated synthetic board/home and harmless finite worker through the real supported CLI. Verify: singleton exclusion; no start under pressure/ESTOP/manual/cap holds; full 120-second recovery; one side-effect command; `--max 1` board concurrency; post-command exact identity; timeout drains without signals; and priority-miss logging. Do not point the canary at production queues or stress the host.
+Before any operational step:
 
-For the final live zero-start check, keep the helper manually held, acquire authority, and verify status/lock/telemetry with no eligible work admitted. Activation and clearing the exact unchanged maintenance ESTOP require a separate explicit release-owner step.
+1. Obtain the packaged archive, release receipt, and manifest. Verify the archive SHA-256, frozen Git commit/tree, original base `5910de20bc9839fdd36e791a9d72ba2c2e722f66`, and every packaged-file SHA-256 before extracting or running anything.
+2. Confirm exact-snapshot quality review and dedicated cross-company `reviewscope` approval with no unresolved scope veto. Review must cover the cumulative diff, this runbook, `PACKAGE_MANIFEST.md`, `REQUIREMENT_MATRIX.md`, and the release receipt.
+3. Resolve B-003. The helper deliberately refuses a nonzero `kanban.dispatch_stale_timeout_seconds` because supported `kanban dispatch` does not carry daemon stale-timeout parity. Either explicitly approve/set zero or deliver separately approved supported-CLI parity. Do not bypass the refusal.
+4. Separately authorize and pass B-004, the real Darwin launchd coalition canary. A detached or session-leader child is not proof that `launchctl bootout` preserves descendants.
+5. Separately authorize and perform B-005: discover every current board and query SQLite read-only for null/blank `notifier_profile`. Any unowned subscription blocks rollout pending routing proof or an independently approved migration.
+6. Verify the retained absolute Hermes executable, Python 3.11 environment, source commit, `psutil`, and YAML support. Do not install, upgrade, or remove dependencies during cutover.
+7. Prove all old gateway dispatcher-capable processes are stopped, not merely configured off. Reconcile canonical task/run rows with exact worker `(pid, creation time)` and ancestry. Terminal-card living workers still count. Unknown identity, PID reuse, stale rows, or ambiguous descendants block the operation.
+8. Capture consistent SQLite backups plus exact config/plist receipts in a 0700 directory with 0600 files. Record whether each prior config key was unset so rollback can restore absence rather than invent a value.
+9. Keep the current maintenance ESTOP byte-for-byte unchanged through drain. The helper neither owns nor clears it.
 
-## Lifecycle
+## Incompatible-config refusal
 
-- `hold` prevents new admission only.
-- `resume` removes only `manual-hold.json` state and restarts recovery dwell; it never changes `$HERMES_HOME/ESTOP`.
-- A service stop request first engages the helper hold. Do not `bootout`, `kickstart -k`, unload, update, or replace the service while a command, worker, known descendant, or unknown coalition member remains.
-- Wait for canonical runs and exact `(pid, creation time)` identities to drain naturally. Never kill or relabel a worker to make a drain pass.
-- Persistent `uncertain-outcome` requires operator reconciliation of the pending journal, CLI output, canonical runs, and processes. Do not delete or auto-acknowledge it.
+`check` and preflight must validate the effective **default-profile** contract before `run` is considered:
+
+- `dispatch_in_gateway` is explicitly false, and no enabled old gateway still owns dispatch;
+- `kanban.max_in_progress` is exactly 2;
+- per-profile concurrency is exactly 1;
+- orphan reconciliation is enabled;
+- `dispatch_stale_timeout_seconds` is exactly 0 until supported parity exists;
+- the configured Hermes source commit and CLI JSON contracts match the reviewed baseline;
+- every configured board path is absolute, unique, schema-compatible, bounded, symlink-safe, and readable with SQLite `mode=ro` plus `query_only`;
+- every subscription has a nonblank notification owner;
+- state, lock, executable, source, and board paths have the expected ownership and restrictive modes.
+
+A missing key, wrong type/value, source drift, CLI output drift, malformed/oversized output, missing board, unknown telemetry/process identity, or notification ambiguity is a refusal or hold—not a reason to patch files, retry a possibly successful command, or continue with reduced coverage.
+
+## Singleton gateway coordination
+
+The helper and gateway coordinate through the same `.dispatcher.lock` for their active lifetime. The helper lock is non-inheritable/CLOEXEC and children close file descriptors. Operational rules:
+
+1. Disable embedded gateway dispatch through the supported default-profile config interface only after approval; no named-profile edits.
+2. Drain and restart the old gateway safely so the boot-read setting actually takes effect.
+3. Verify from process state and logs that no enabled old gateway remains; config text alone is insufficient.
+4. Start only one helper. Lock contention is a hard refusal. Never delete or replace the lock file to defeat a live owner.
+5. Observation-only `status` and `check` do not establish dispatch authority. A healthy check does not authorize `run`.
+6. Manual CLI/API/agent starts bypass the helper and remain a documented race; prohibit them administratively during cutover and canary. The host cap is admission-only, not a global atomic limit.
+
+## Future staged installation
+
+Execute only with separate installation/config/service authorization:
+
+1. Extract the verified archive to a versioned per-user operations directory outside installed Hermes source, for example `$HERMES_HOME/operations/kanban-resource-controller/<artifact-sha256>/`. Never copy it into the retained Hermes checkout or mutate installed Hermes source.
+2. Create a distinct 0700 runtime-state directory. Create `controller.json` mode 0600 from `controller.example.json`, replacing every placeholder with reviewed absolute paths and the expected retained Hermes **source** commit (not the helper package commit).
+3. Use the supported Hermes config interface for approved default-profile values. Record before/after receipts and prior unset state. Make no named-profile changes.
+4. Run observation-only `check`. It must report source/config/schema compatibility, honest live pressure, exact workers/descendants, all boards, and zero unowned subscriptions. Fixture recovery is not live recovery proof.
+5. Render the reviewed plist with absolute paths but do not load it until B-004 passes, the old gateway lacks dispatcher capability, and the shared lock is available.
+6. Load the LaunchAgent only in a separately authorized window. Keep the helper manually held. Confirm restrictive artifact/state modes, one service instance, the expected executable/import root, fresh status, bounded logs, and lock ownership.
+7. Do not remove any old package. Package removal is a separate operation allowed only after retained-runtime, service, board-integrity, notification, and rollback proof.
+
+## Admission policy and normal operation
+
+The loop performs no LLM inference. Existing automatic decomposition may use its already configured auxiliary model when enabled.
+
+Every 30 seconds, the helper samples load1, logical cores, available memory, native Darwin pressure, and cumulative page-in/page-out bytes. It holds immediately when load1 is at least the core count, pressure is not normal, memory is below 4 GiB, either paging counter increases, or any sample is missing/malformed/non-finite. First sample, counter reset/decrease, monotonic-time reversal, restart, or a long sample gap resets recovery.
+
+Admission becomes eligible only after 120 uninterrupted seconds with load1 no greater than 0.8 times cores, at least 5 GiB available, normal pressure, and no paging increase. The exact 4 GiB boundary leaves the helper held until the 5 GiB recovery threshold is reached. Every attempted side-effecting command consumes the window and requires a new full recovery dwell.
+
+Before and immediately before a command, reconcile exact process/run identities and enforce host cap 2, per-profile cap 1, and board concurrency `dispatch --max 1`. Existing excess workers are never killed and drain naturally. Under host pressure, ESTOP, manual hold, capacity, unowned-subscription, incompatible-config, or identity ambiguity, run no dispatch/decompose command.
+
+In an eligible window, issue at most one side-effecting command against one board: one explicit-task decomposition or one dispatch, never both and never `--all`. For dispatch, bounded read-only dry runs predict each board, classify merge-conflict > review > build, apply round-robin ties, and age a passed board into one admission after six eligible windows. This is **best-effort downstream-first**, not a guarantee. If canonical post-command reconciliation differs from the prediction, record one `priority_miss`; never retry, kill, or issue another command in that window.
+
+Timeout, launch failure, nonzero status, output/contract drift, or ambiguous post-command reconciliation writes persistent `uncertain-outcome`. Reconcile the pending journal, captured output, canonical rows, and processes manually. Do not delete/acknowledge evidence or restart admissions merely because the child deadline expired; bounded supervision sends no signal and waits for a finite child to end.
+
+## Hold, recovery, and safe shutdown
+
+- `hold` creates only the helper's admission hold. It does not stop existing workers or alter Hermes ESTOP.
+- `resume` removes only `manual-hold.json`, records the reason, and restarts the full recovery dwell. It does not imply healthy telemetry or capacity.
+- A persistent uncertainty, incompatible contract, stale run, unknown descendant, or unowned subscription requires operator disposition and normally a new reviewed snapshot or separately approved operational fix.
+- For shutdown, engage helper hold first and wait until no command, worker, known descendant, or unknown coalition member remains. Recheck canonical rows and exact process identities immediately before service action.
+- Do not `bootout`, unload, `kickstart -k`, replace, update, or overwrite the service while descendants exist. Never signal, relabel, reclaim, or repair a worker merely to make drain appear complete.
+- If drain or identity proof cannot complete, leave the helper held and service loaded, record the exact blocker, and stop. Urgency does not authorize descendant termination.
+
+## Separately authorized bounded canary
+
+### Phase A — isolated synthetic canary
+
+Use a temporary isolated HOME/HERMES_HOME, synthetic board database, harmless finite worker, stub telemetry, and the real supported CLI path. Do not point any path at production state, dispatch production work, or stress the host. Verify:
+
+1. incompatible config and second lock owner refuse safely;
+2. pressure, ESTOP, manual hold, each capacity cap, unowned subscription, and identity ambiguity produce zero starts;
+3. first sample plus the complete 120-second recovery interval is required;
+4. one eligibility window produces at most one side-effecting command;
+5. board `--max 1`, exact task/worker identity, decomposition-by-explicit-id, priority selection, aging, and `priority_miss` behavior match the requirement matrix;
+6. timeout sends no signal, tracks/drains the finite child, and persists uncertainty;
+7. shutdown refuses while any command, worker, known descendant, or unknown coalition member remains.
+
+Abort Phase A on any unexpected process, path escape, write outside the temporary roots, second side effect, signal, missing/oversized output, contract drift, leaked lock/fd, stale status, or failed assertion. Preserve all evidence and do not progress.
+
+### Phase B — Darwin coalition canary
+
+This phase needs its own explicit authorization. Use only a harmless finite child under a disposable LaunchAgent. Observe real launchd ancestry/coalition behavior and prove the runbook's hold→natural drain→offline ordering. Abort before any bootout/restart if identity is unknown or a non-canary descendant appears. Never extrapolate from detached/session-leader behavior.
+
+### Phase C — production zero-start observation
+
+This phase requires separate production/canary authorization after A and B pass. Keep helper manual hold and the exact maintenance ESTOP unchanged. Verify executable/import roots, singleton lock, fresh telemetry/status, board integrity, notifier ownership, and disabled embedded dispatch with **zero eligible work admitted**. Abort on config/source drift, any unowned subscription, unknown worker/descendant, lock contention, stale status, unexpected board mutation, any start/decomposition, or inability to prove zero-start behavior.
+
+Activation is not part of the canary. Clearing the exact unchanged maintenance ESTOP, removing manual hold, or allowing production admission is a later explicit release-owner decision with its own abort plan.
 
 ## Rollback
 
-1. Engage helper hold and preserve status/journals.
-2. Drain commands, workers, descendants, and coalition members naturally.
-3. Leave embedded gateway dispatch disabled while helper failure or ambiguity remains; an idle queue is safer than dual dispatch.
-4. After safe service exit, restore only the previously reviewed artifact/plist.
-5. If returning dispatch to the gateway, restore every exact prior config value (including unset values) through supported CLI and restart only after affected work drains.
-6. Never clear Hermes ESTOP, delete uncertain evidence, remove worktrees, force worker termination, or uninstall the retained package as rollback.
+Rollback is admission-safe, not availability-first:
 
-## Legacy notifications
+1. Engage helper hold and preserve status, logs, receipts, and pending journals.
+2. Drain commands, workers, descendants, and coalition members naturally; unknown state blocks unload.
+3. Leave embedded gateway dispatch disabled while failure or ambiguity remains. An idle queue is safer than dual dispatch.
+4. After a proven safe service exit, restore only the exact previously reviewed plist/artifact or leave the helper offline.
+5. If returning dispatch to the gateway, restore every exact prior default-profile value—including removing keys previously unset—through supported CLI. Restart only after all affected work drains and exclusive lock ownership is proven.
+6. Re-verify board integrity, service exclusivity, process ancestry, notification routing, and exact config receipts before considering rollback complete.
 
-The gateway includes unowned subscriptions only when it owns the dispatcher lock. External lock ownership can therefore stop legacy unowned delivery. Historical read-only checks found zero such rows in four databases, but every rollout preflight rereads every current board. This helper never migrates, fabricates, or rewrites notification ownership.
+Rollback never clears Hermes ESTOP, deletes uncertain evidence, removes board state/worktrees, force-terminates workers, activates the prior load-adaptive branch, changes named profiles, or uninstalls the retained package.
+
+## Legacy unowned subscriptions and delivery limitation
+
+Gateway notification collection includes unowned subscriptions only when the gateway owns the dispatcher lock. External helper ownership can therefore stop legacy unowned delivery. Prior read-only queries found zero unowned subscriptions across four discovered board databases. That is historical point-in-time evidence only; it neither proves current state nor guarantees future delivery.
+
+Every authorized rollout/canary must rediscover and reread every current board. A null/blank owner is a hard activation abort. This helper never migrates, fabricates, or rewrites ownership, and fixture/readiness success does not prove end-to-end notification delivery.
+
+## Unresolved blockers at packaging time
+
+- B-003: approve production stale-timeout zero/parity; current nonzero policy remains incompatible.
+- B-004: separately authorize and pass real Darwin launchd coalition behavior.
+- B-005: separately authorize live read-only board discovery, zero-unowned recheck, and routing proof.
+- Installation, default-profile config changes, service changes, production zero-start canary, activation, ESTOP transition, live dispatch/decomposition, and package removal each remain unauthorized.
+- Canonical-inventory assignee cross-check hardening is an out-of-scope follow-up; GitHub issue publication remains pending explicit shared-repository approval.
+- Smithers #2041 remains separate and backlog-only.
+
+No production activation or production canary occurred while building, verifying, or packaging this artifact.

@@ -52,13 +52,13 @@ From `contrib/kanban-resource-controller` in the isolated worktree:
     /Users/jhaynes/.hermes/hermes-agent/venv/bin/python -m compileall -q -j 1 resource_controller tests
     /usr/bin/plutil -lint launchd/ai.hermes.kanban-resource-controller.plist
 
-The verification successor records the exact frozen SHA, final count, output, and cumulative `git diff --check` receipt in its Kanban handoff. Tests are serial at the file runner level; only finite child execution inside the timeout case provides controlled concurrency.
+The external package receipt records the exact frozen SHA/tree, archive SHA-256, per-file manifest, final count/output, and cumulative `git diff --check` receipt. Tests are serial at the file runner level; only finite child execution inside the timeout case provides controlled concurrency.
 
 ## Open activation/release requirements
 
 - B-003: production stale-timeout policy is expected to be incompatible until explicitly approved/changed or supported CLI parity exists.
 - B-004: real Darwin launchd coalition canary is not authorized and not performed.
 - B-005: live read-only unowned-subscription recheck is not performed by this build task.
-- B-006: exact final verification-snapshot review, including mandatory cross-company `reviewscope`, remains required before this successor hands off.
+- B-006: the implementation snapshot `4d081104d8039869ae64c74a202575ca2e2924e8` received exact-SHA quality and mandatory cross-company `reviewscope` approval. The final packaging snapshot must receive the same exact-SHA review before release handoff.
 - Real launchd topology, live read-only telemetry, production board metadata, and notification routing remain release gates; fixture or sandbox success is not represented as live proof.
 - No installation, config/service mutation, activation, production dispatch/decomposition, package removal, ESTOP change, or worker signal occurred.

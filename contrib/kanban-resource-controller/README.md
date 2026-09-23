@@ -23,6 +23,7 @@ This standalone Python helper gates automatic Kanban admission without changing 
 - `launchd/ai.hermes.kanban-resource-controller.plist`: uninstalled template only.
 - `RUNBOOK.md`: separately gated installation, lifecycle, canary, and rollback.
 - `REQUIREMENT_MATRIX.md`: requirement-to-test coverage and open gates.
+- `PACKAGE_MANIFEST.md`: complete packaged-file/change inventory and immutable identity model.
 
 ## Serial development gates
 
@@ -32,6 +33,8 @@ From this directory, using the retained Hermes Python environment:
     python3 -m compileall -q -j 1 resource_controller tests
 
 Do not run these tests in parallel. They use temporary homes/databases and finite synthetic subprocesses only. No test dispatches production work.
+
+The packaged archive and external release receipt are produced only from a clean frozen commit after these gates pass. See `PACKAGE_MANIFEST.md`; the archive remains uninstalled and unactivated.
 
 ## CLI surface
 
