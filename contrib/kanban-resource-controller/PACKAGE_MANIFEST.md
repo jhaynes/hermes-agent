@@ -12,11 +12,14 @@ The immutable deliverable is identified by all of the following in the external 
 
 The release receipt is intentionally outside the archive: an archive cannot contain its own final digest without a circular identity. Verify the receipt and archive before extraction. `git archive` includes tracked files only; runtime state, credentials, production configuration, databases, logs, and worktrees are excluded.
 
-Reproducible package command, with `<frozen-sha>` replaced by the reviewed packaging commit:
+Reproducible package command, with `<frozen-sha>` replaced by the reviewed packaging commit. The explicit commit timestamp is required because archiving the `commit:path` tree expression otherwise stamps entries with wall-clock time:
 
-    git archive --format=tar --prefix=kanban-resource-controller/ \
-      <frozen-sha>:contrib/kanban-resource-controller \
-      | gzip -n > kanban-resource-controller-<frozen-sha>.tar.gz
+    frozen_sha=<frozen-sha>
+    frozen_mtime=$(git show -s --format=%ct "$frozen_sha")
+    git archive --format=tar --mtime="@$frozen_mtime" \
+      --prefix=kanban-resource-controller/ \
+      "$frozen_sha":contrib/kanban-resource-controller \
+      | gzip -n > kanban-resource-controller-"$frozen_sha".tar.gz
 
 The archive is a review artifact only. Its existence is not installation or activation authorization.
 
