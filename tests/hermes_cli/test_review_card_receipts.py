@@ -81,34 +81,9 @@ def test_valid_changes_remain_changes_not_clean_approval(review_receipts):
 
 
 @pytest.mark.parametrize('defect', ['contradiction', 'verification', 'prior', 'final', 'route'])
-def test_submission_rejects_on_own_card_before_completion(review_receipts, tmp_path, monkeypatch, defect):
-    from pathlib import Path
-    import os
-    import subprocess
-    import sys
-    from hermes_cli import kanban_db as kb, kanban_db_connect as kbc
-    from tools import kanban_tools
-    from tests.hermes_cli.review_submission import submit
-
-    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
-    monkeypatch.setenv('HERMES_HOME', str(tmp_path / '.hermes'))
-    monkeypatch.setenv('HERMES_PROFILE', 'reviewtests')
-    monkeypatch.setenv('HOME', str(tmp_path))
-    monkeypatch.delenv('HERMES_KANBAN_DB', raising=False)
-    monkeypatch.delenv('HERMES_DELEGATED_CHILD_CONTEXT', raising=False)
-    kb.init_db()
-    with kbc.connect() as conn:
-        task_id = kb.create_task(conn, title='Submission fixture', assignee='reviewtests')
-        task = kb.claim_task(conn, task_id, claimer='reviewtests:1')
-        assert task is not None
-    monkeypatch.setenv('HERMES_KANBAN_TASK', task_id)
-    monkeypatch.setenv('HERMES_KANBAN_RUN_ID', str(task.current_run_id))
+def test_submission_rejects_without_board_access(review_receipts, tmp_path, monkeypatch, capsys, defect):
     card, manifest, journal = review_receipts
-    manifest['task_id'] = task_id
-    for receipt in journal:
-        receipt.update(task_id=task_id, run_id=task.current_run_id)
-    good = card['runs'][0]['metadata']
-    malformed = deepcopy(good)
+    malformed = deepcopy(card['runs'][0]['metadata'])
     if defect == 'contradiction':
         malformed['findings'] = [{'severity': 'low', 'location': {'path': 'x.py', 'line': 1},
                                  'evidence': {'kind': 'reasoned', 'reasoning': 'required fix'},
@@ -116,34 +91,58 @@ def test_submission_rejects_on_own_card_before_completion(review_receipts, tmp_p
     else:
         malformed.pop({'verification': 'verification_run', 'prior': 'prior_findings',
                        'final': 'final_receipt', 'route': 'effective_route'}[defect])
-    handlers = {'kanban_show': kanban_tools._handle_show,
-                'kanban_complete': kanban_tools._handle_complete,
-                'kanban_comment': kanban_tools._handle_comment}
-    calls = []
+    invoke = _validator_cli(tmp_path, monkeypatch, manifest, journal, malformed)
+    assert invoke() != 0
+    output = json.loads(capsys.readouterr().out)
+    from tests.hermes_cli.review_card_receipts import validate_submission
+    assert output == validate_submission(malformed, manifest, journal, 7)
+    assert output['errors'] and 'arguments' not in output
 
-    def tool(name, payload):
-        calls.append(name)
-        if defect == 'route':
-            root = Path(kb.__file__).resolve().parents[1]
-            result = subprocess.run(
-                [sys.executable, str(root / 'tests/hermes_cli/review_live_tool.py'), str(root)],
-                input=json.dumps({'name': name, 'args': payload}), text=True,
-                capture_output=True, check=True, env=dict(os.environ), timeout=30,
-            )
-            return json.loads(result.stdout)
-        return json.loads(handlers[name](payload))
 
-    rejected = submit(malformed, manifest, journal, task.current_run_id, tool)
-    assert rejected['state'] == 'invalid'
-    assert 'kanban_complete' not in calls, 'schema rejection must precede board completion'
-    with kbc.connect() as conn:
-        assert kb.get_task(conn, task_id).status == 'running'
-        assert json.loads(kb.list_comments(conn, task_id)[-1].body)['schema_errors'] == rejected['errors']
-    good['verdict'] = 'request_changes'
-    journal[2]['exit_code'] = 1  # failed tests are valid evidence, not schema failure
-    accepted = submit(good, manifest, journal, task.current_run_id, tool)
-    assert accepted['state'] == 'received_valid', accepted
-    with kbc.connect() as conn:
-        assert kb.get_task(conn, task_id).status == 'done'
-        actual = kb.latest_run(conn, task_id).metadata
-        assert {key: actual[key] for key in good} == good
+@pytest.mark.parametrize('verdict', ['approve', 'request_changes'])
+def test_submission_prints_exact_arguments_without_board_write(review_receipts, tmp_path, monkeypatch, capsys, verdict):
+    import os
+
+    card, manifest, journal = review_receipts
+    metadata = card['runs'][0]['metadata']
+    metadata['verdict'] = verdict
+    if verdict == 'request_changes':
+        journal[2]['exit_code'] = 1  # failed tests remain evidence, not approval
+    invoke = _validator_cli(tmp_path, monkeypatch, manifest, journal, metadata)
+    environment = dict(os.environ)
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    assert invoke() == 0
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {
+        'task_id': manifest['task_id'], 'board': manifest['board'],
+        'summary': f"quality review: {verdict}", 'metadata': metadata,
+    }
+    assert 'submit this with the kanban_complete tool' in output.err
+    assert dict(os.environ) == environment, 'never alter worker authority markers'
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()} == before
+
+
+def _validator_cli(tmp_path, monkeypatch, manifest, journal, metadata):
+    import subprocess
+    import sys
+    from tools import kanban_tools
+    from tests.hermes_cli.review_submission import main
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('validator must not invoke board handlers or subprocess bridges')
+
+    for name in ('_handle_show', '_handle_complete', '_handle_comment'):
+        monkeypatch.setattr(kanban_tools, name, forbidden)
+    monkeypatch.setattr(subprocess, 'run', forbidden)
+    monkeypatch.setenv('HERMES_DELEGATED_CHILD_CONTEXT', 'preserved-test-marker')
+    monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    monkeypatch.delenv('HERMES_KANBAN_RUN_ID', raising=False)
+    monkeypatch.delenv('HERMES_KANBAN_BOARD', raising=False)
+    manifest_path = tmp_path / 'manifest.json'
+    metadata_path = tmp_path / 'review-result.json'
+    manifest_path.write_text(json.dumps({**manifest, 'tool_python': sys.executable,
+                                         'tool_runtime_root': str(tmp_path)}))
+    metadata_path.write_text(json.dumps(metadata))
+    (tmp_path / 'quality-receipts.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in journal))
+    monkeypatch.setattr(sys, 'argv', ['review_submission', str(manifest_path), '7', str(metadata_path)])
+    return main
