@@ -19,7 +19,7 @@ Smithers #2041 is separate, backlog-only work and is not part of this artifact o
 
 Before any operational step:
 
-1. Obtain the packaged archive, release receipt, and manifest. Verify the archive SHA-256, frozen Git commit/tree, original base `5910de20bc9839fdd36e791a9d72ba2c2e722f66`, and every packaged-file SHA-256 before extracting or running anything.
+1. Obtain the packaged archive, release receipt, and manifest. Verify the archive SHA-256, frozen Git commit/tree, original comparison base `5910de20bc9839fdd36e791a9d72ba2c2e722f66`, reviewed retained Hermes source baseline `8eee60faaac3c7c46897df59363501a8048d20e4`, and every packaged-file SHA-256 before extracting or running anything. The comparison base identifies the cumulative external-artifact diff; the source baseline independently pins the installed CLI/schema contract.
 2. Confirm exact-snapshot quality review and dedicated cross-company `reviewscope` approval with no unresolved scope veto. Review must cover the cumulative diff, this runbook, `PACKAGE_MANIFEST.md`, `REQUIREMENT_MATRIX.md`, and the release receipt.
 3. Resolve B-003. The helper deliberately refuses a nonzero `kanban.dispatch_stale_timeout_seconds` because supported `kanban dispatch` does not carry daemon stale-timeout parity. Either explicitly approve/set zero or deliver separately approved supported-CLI parity. Do not bypass the refusal.
 4. Separately authorize and pass B-004, the real Darwin launchd coalition canary. A detached or session-leader child is not proof that `launchctl bootout` preserves descendants.

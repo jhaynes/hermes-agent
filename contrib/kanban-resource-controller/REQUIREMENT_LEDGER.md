@@ -20,7 +20,7 @@ The sources are ordered. A lower source cannot override a higher one.
 2. `/Users/jhaynes/.hermes/plans/hermes-kanban-build-only-controller.md`, SHA-256 `b8bed3cb7745312aca32e6abc7751e7ee40af84ab7ffac56bb257374884b7905` (including the binding 2026-09-22 amendment at lines 59-79).
 3. `/Users/jhaynes/.hermes/plans/hermes-resource-controller-build-handoff.md`, SHA-256 `a897e4fb59e929754026e106f7af2316f389161ee830d1bb2b48fa10a5bec65d`, only where consistent with sources 1-2.
 4. `/Users/jhaynes/.hermes/plans/hermes-desktop-resource-containment.md`, SHA-256 `170ddca6104c228ccbdf86904913a2c62d37400ea74c301c63a8fb38fe51c0f0`, only for still-applicable drain and rollback constraints. Its broad automatic pause/resume proposal is superseded.
-5. Retained Hermes source baseline `5910de20bc9839fdd36e791a9d72ba2c2e722f66` for executable CLI and schema contracts.
+5. Retained Hermes source baseline `8eee60faaac3c7c46897df59363501a8048d20e4` for executable CLI and schema contracts. This runtime compatibility pin is independent of the original comparison base recorded below.
 
 The build-only plan explicitly says its reconciliation wins (lines 3-16), adds downstream-first priority (lines 18-22), selects the external-controller boundary (lines 24-25 and 36-43), separates cutover (lines 45-51), and defines validation/rollback (lines 53-57).
 
