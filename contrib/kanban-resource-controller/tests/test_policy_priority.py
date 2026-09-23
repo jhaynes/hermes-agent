@@ -49,6 +49,16 @@ class AdmissionPolicyTests(unittest.TestCase):
                 policy.observe(sample(0))
                 self.assertEqual(policy.observe(current).reason, reason)
 
+        policy = AdmissionPolicy(recovery_seconds=30, max_sample_gap=35)
+        self.assertEqual(policy.observe(sample(0, available=4 * GIB)).reason, "paging-baseline")
+        self.assertEqual(
+            policy.observe(sample(30, available=4 * GIB)).reason,
+            "recovery-memory",
+            "the initial-memory boundary is allowed but cannot satisfy the 5 GiB recovery band",
+        )
+        self.assertEqual(policy.observe(sample(60, available=5 * GIB)).reason, "recovery-dwell")
+        self.assertTrue(policy.observe(sample(90, available=5 * GIB)).eligible)
+
     def test_unknown_reset_and_nonmonotonic_samples_fail_closed(self) -> None:
         invalid = [
             sample(30, load1=math.nan),
@@ -66,6 +76,12 @@ class AdmissionPolicyTests(unittest.TestCase):
         policy.observe(sample(0, page_in=100))
         self.assertEqual(policy.observe(sample(30, page_in=99)).reason, "paging-reset")
         self.assertEqual(policy.observe(sample(20, page_in=99)).reason, "nonmonotonic-time")
+
+        policy = AdmissionPolicy(recovery_seconds=30, max_sample_gap=35)
+        policy.observe(sample(0, page_out=100))
+        self.assertEqual(policy.observe(sample(30, page_out=99)).reason, "paging-reset")
+        self.assertEqual(policy.observe(sample(60, page_out=99)).reason, "recovery-dwell")
+        self.assertTrue(policy.observe(sample(90, page_out=99)).eligible)
 
     def test_recovery_requires_strict_recovery_band_and_command_resets_it(self) -> None:
         policy = AdmissionPolicy(recovery_seconds=120, max_sample_gap=35)
