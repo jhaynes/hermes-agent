@@ -8,8 +8,10 @@ from hermes_cli import kanban_review_state as state
 from hermes_cli.kanban_db_connect import connect
 
 
-@pytest.mark.parametrize('consumed,scope_changes', [(2,False), (2,True), (0,True)])
-def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypatch, consumed, scope_changes):
+@pytest.mark.parametrize('consumed,scope_changes,contradictory', [
+    (2,False,False), (2,True,False), (0,True,False), (2,False,True),
+])
+def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypatch, consumed, scope_changes, contradictory):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
     conn = connect(tmp_path / 'board.db')
     owner = kb.create_task(conn, title='approved ask', assignee='builder', workspace_kind='dir', workspace_path=str(tmp_path))
@@ -35,25 +37,39 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
     round_id = cohort.start_cohort(conn, owner, lanes=lanes, expected_version=1)
     cards = conn.execute('SELECT * FROM review_members WHERE round_id=? ORDER BY mandate', (round_id,)).fetchall()
     assert {r['mandate'] for r in cards} == set(attempt['roster'])
-    for card in sorted(cards, key=lambda c: c['mandate'] == 'scope'):
+    last_lane = 'quality' if contradictory else 'scope'
+    for card in sorted(cards, key=lambda c: c['mandate'] == last_lane):
         lane_run = kb.claim_task(conn, card['task_id'])
         assert lane_run is not None
         cohort.record_runtime_route(conn, card['task_id'], lane_run.current_run_id,
                                     provider='anthropic', model='claude-sonnet-4-5', isolated=True)
         findings = [{'severity':'high', 'location':{'path':'subject.py','line':1},
                      'evidence':{'kind':'reasoned','reasoning':'synthetic unit-test finding'},
-                     'required_change':'remove unrelated behavior'}] if scope_changes and card['mandate']=='scope' else []
+                     'required_change':'remove unrelated behavior'}] if (
+                         scope_changes and card['mandate']=='scope'
+                         or contradictory and card['mandate']=='quality') else []
         receipt = {'attempt_id':attempt['id'],'board_id':attempt['board_id'],'round_id':round_id,
                    'task_id':card['task_id'],'run_id':lane_run.current_run_id,
                    'base_sha':attempt['base_sha'],'target_sha':attempt['target_sha'],
                    'policy_digest':attempt['policy_digest'],'spec_digest':attempt['spec_digest'],
-                   'mandate':card['mandate'],'verdict':'request_changes' if findings else 'approve',
+                   'mandate':card['mandate'],'verdict':'request_changes' if findings and not contradictory else 'approve',
                    'findings':findings,'verification_run':[{'kind':'reasoned','reasoning':'synthetic unit-test review'}], 'prior_findings':[], 'scope':scope_evidence()}
         assert kb.complete_task(conn, card['task_id'], summary='Review receipt submitted', expected_run_id=lane_run.current_run_id,
                                 metadata={'bounded_review':receipt})
         if card['mandate'] != 'scope':
             assert not kb.complete_task(conn, owner, summary='Attempted completion', force=True)
     final = state.get_attempt(conn, owner)
+    assert final is not None
+    if contradictory:
+        members = dict(conn.execute('SELECT mandate,state FROM review_members WHERE round_id=?', (round_id,)))
+        assert members['quality'] == 'invalid', 'Approval cannot contradict its own actionable finding'
+        assert all(value == 'received_valid' for name, value in members.items() if name != 'quality')
+        assert conn.execute('SELECT state FROM review_rounds WHERE id=?', (round_id,)).fetchone()[0] == 'invalid'
+        assert final['completed_rounds'] == consumed
+        assert final['state'] != 'approved'
+        assert not kb.complete_task(conn, owner, summary='Contradictory review is not approval', force=True)
+        conn.close()
+        return
     if consumed == 0:
         assert final['completed_rounds'] == 1
         assert final['state'] == 'repair'
