@@ -17,7 +17,7 @@
 The sources are ordered. A lower source cannot override a higher one.
 
 1. Live task `t_a4e29e97`, including its acceptance criteria and prohibitions.
-2. `/Users/jhaynes/.hermes/plans/hermes-kanban-build-only-controller.md`, SHA-256 `1d76749432f8cbf69be78bdac99ae3470e6349f36ca0037da58cac3f80a62213`.
+2. `/Users/jhaynes/.hermes/plans/hermes-kanban-build-only-controller.md`, SHA-256 `b8bed3cb7745312aca32e6abc7751e7ee40af84ab7ffac56bb257374884b7905` (including the binding 2026-09-22 amendment at lines 59-79).
 3. `/Users/jhaynes/.hermes/plans/hermes-resource-controller-build-handoff.md`, SHA-256 `a897e4fb59e929754026e106f7af2316f389161ee830d1bb2b48fa10a5bec65d`, only where consistent with sources 1-2.
 4. `/Users/jhaynes/.hermes/plans/hermes-desktop-resource-containment.md`, SHA-256 `170ddca6104c228ccbdf86904913a2c62d37400ea74c301c63a8fb38fe51c0f0`, only for still-applicable drain and rollback constraints. Its broad automatic pause/resume proposal is superseded.
 5. Retained Hermes source baseline `5910de20bc9839fdd36e791a9d72ba2c2e722f66` for executable CLI and schema contracts.
@@ -104,11 +104,11 @@ At baseline, `hermes_cli/kanban_ops.py:60-108` loads the effective default-profi
 
 Every supported dispatch tick performs reclaim/promotion before the spawn gate (`kanban_db_dispatch.py:1716-1736, 1853-1867`). Therefore no dispatch command may run during resource, ESTOP, manual, capacity, identity, compatibility, or uncertainty holds. The helper must reconcile before and after every command and must not retry an uncertain dispatch.
 
-### 4.4 Whole-board selection limitation
+### 4.4 Whole-board selection limitation and approved approximation
 
 The supported dispatch CLI accepts a board, not a task/stage selector. Within a board, baseline dispatch orders each lane by priority then creation time (`kanban_db_dispatch.py:1800-1806`), runs ready work before review while reserving one slot for review when possible (`1869-1933`), and can mutate maintenance state before selecting a worker. An external observer cannot atomically guarantee that the task it predicted remains the task selected.
 
-This limitation is the central unresolved blocker in section 13. No implementation may silently substitute round-robin board selection for downstream-first resource priority.
+Justin resolved B-001/B-002 in the binding amendment dated 2026-09-22. The helper uses per-board supported `dispatch --dry-run --max 1`, classifies predicted picks deterministically as merge-conflict > review > build, selects by stage with round-robin ties, and grants one aging admission after six passed healthy windows. The accepted dry-run-to-dispatch race is logged as `priority_miss`; it never triggers a retry, second command, or worker kill. Status must call the policy `best-effort downstream-first`, never guaranteed priority.
 
 ## 5. Configuration compatibility and refusal rules
 
@@ -280,15 +280,13 @@ Future quality gates, once implementation is authorized: targeted serial artifac
 
 ## 13. Unresolved blocker register
 
-### B-001 — `OPEN`, prerequisite approval: downstream-first priority versus supported whole-board dispatch
+### B-001 — `RESOLVED FOR IMPLEMENTATION`, approved best-effort whole-board prediction
 
-Binding plan lines 18-22 require merge-conflict resolution before reviews, reviews before tests, and downstream completion before new builds. It explicitly says board round-robin is insufficient. The supported CLI selects a board, not a specific task/stage, and selection can change between observation and claim. The pinned candidate implements round-robin and explicitly admits any eligible task may be selected; it does not satisfy this requirement.
+Justin's 2026-09-22 binding amendment selects per-board supported dry-run prediction and explicitly accepts the bounded dry-run-to-dispatch race. Divergence is a `priority_miss` diagnostic and never authorizes retry, a second command, or a worker kill.
 
-No-core options each change product policy: best-effort prediction accepts a race, refusing mixed boards risks starvation, and weakening/deferring downstream-first drops a requirement. A task-selective core seam was previously declined. Justin must explicitly choose an approved no-core tradeoff or amend the no-core boundary. Until then, implementation of active dispatch selection is blocked.
+### B-002 — `RESOLVED FOR IMPLEMENTATION`, deterministic stages and bounded aging
 
-### B-002 — `OPEN`, prerequisite approval: priority classification, prerequisite work, yielding, and starvation
-
-The binding plan leaves stage classification, resource reservation, prerequisite work needed to unblock higher-priority phases, safe yielding/preemption, and starvation handling as design questions. Workers may not be killed. There is no approved mapping from task metadata/status/assignee to merge/review/test/build stage and no approved starvation bound. These are consequential scheduler choices, not implementation details.
+The same amendment defines merge-conflict (`builder*` plus title regex `conflict|merge|rebase`) > review (`review*`) > build, round-robin ties, and one aging admission after six consecutive passed healthy windows. No yielding or preemption is authorized.
 
 ### B-003 — `OPEN`, activation prerequisite: stale-timeout CLI parity
 
@@ -332,5 +330,5 @@ Every implementation review round must include the dedicated `reviewscope` revie
 - Smithers #2041: separate/backlog-only.
 - Isolated workspace handoff: established.
 - Authorization evidence: recorded and bounded.
-- Implementation/activation: intentionally not performed.
-- Unresolved blockers: B-001 through B-006 remain explicit; B-001/B-002 block implementation of active selection, and B-003 through B-006 block activation/release.
+- Implementation is now authorized only in the external staging artifact; installation/activation remain forbidden.
+- Unresolved blockers: B-001/B-002 are resolved by Justin's 2026-09-22 binding amendment. B-003 through B-006 remain activation/release prerequisites and do not authorize production changes in this implementation task.
