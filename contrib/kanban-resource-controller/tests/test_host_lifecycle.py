@@ -1,13 +1,38 @@
 from __future__ import annotations
 
-import tempfile
 import unittest
 
 from resource_controller.host import HostSampler, TelemetryError
 from resource_controller.lifecycle import LifecycleGuard, LifecycleHold
 from resource_controller.policy import AdmissionPolicy
+from resource_controller.telemetry import MemoryHealth
 
 GIB = 1024**3
+
+
+class _FakeBackend:
+    def __init__(self, health=None, error=None):
+        self._health = health
+        self._error = error
+
+    def sample(self):
+        if self._error is not None:
+            raise self._error
+        return self._health
+
+
+def _health(**overrides) -> MemoryHealth:
+    base = dict(
+        available_bytes=6 * GIB,
+        swap_in_bytes=123,
+        swap_out_bytes=456,
+        counter_page_size_bytes=16384,
+        pressure="normal",
+        pressure_detail={"level": 1},
+        source="darwin-vm_stat+sysctl",
+    )
+    base.update(overrides)
+    return MemoryHealth(**base)
 
 
 class HostSamplerTests(unittest.TestCase):
@@ -16,31 +41,29 @@ class HostSamplerTests(unittest.TestCase):
             monotonic=lambda: 12.5,
             loadavg=lambda: (3.0, 2.0, 1.0),
             logical_cores=lambda: 10,
-            available_memory=lambda: 6 * GIB,
-            paging_counters=lambda: (123, 456),
-            pressure_level=lambda: 1,
+            backend=_FakeBackend(health=_health()),
         )
         result = sampler.sample()
         self.assertEqual(result.pressure, "normal")
-        self.assertEqual((result.page_in, result.page_out), (123, 456))
+        self.assertEqual((result.swap_in, result.swap_out), (123, 456))
+        self.assertEqual(result.counter_page_size_bytes, 16384)
+        self.assertEqual(result.source, "darwin-vm_stat+sysctl")
 
-    def test_unknown_pressure_or_sensor_failure_is_telemetry_error(self) -> None:
-        for pressure in (0, 3, None):
-            with self.subTest(pressure=pressure), self.assertRaises(TelemetryError):
-                HostSampler(
-                    monotonic=lambda: 1,
-                    loadavg=lambda: (1, 1, 1),
-                    logical_cores=lambda: 4,
-                    available_memory=lambda: 6 * GIB,
-                    paging_counters=lambda: (1, 1),
-                    pressure_level=lambda: pressure,
-                ).sample()
+    def test_backend_telemetry_error_propagates(self) -> None:
+        with self.assertRaises(TelemetryError):
+            HostSampler(
+                monotonic=lambda: 1,
+                loadavg=lambda: (1, 1, 1),
+                logical_cores=lambda: 4,
+                backend=_FakeBackend(error=TelemetryError("parse-error", "boom")),
+            ).sample()
 
+    def test_sensor_failure_is_telemetry_error(self) -> None:
         def broken() -> tuple[float, float, float]:
             raise OSError("sensor unavailable")
 
         with self.assertRaises(TelemetryError):
-            HostSampler(loadavg=broken).sample()
+            HostSampler(loadavg=broken, backend=_FakeBackend(health=_health())).sample()
 
 
 class LifecycleTests(unittest.TestCase):

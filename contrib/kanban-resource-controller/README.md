@@ -2,12 +2,12 @@
 
 Status: reviewable staging artifact only. It is not installed, configured, loaded, or active.
 
-This standalone Python helper gates automatic Kanban admission without changing Hermes source. It owns the same dispatcher flock for its active lifetime, samples Darwin host pressure every 30 seconds, reads canonical board state in SQLite read-only mode, reconciles exact worker identities, and invokes only supported Hermes CLI commands. It never writes or clears Hermes ESTOP, never signals a worker, and never repairs board rows.
+This standalone Python helper gates automatic Kanban admission without changing Hermes source. It owns the same dispatcher flock for its active lifetime, samples host memory pressure every 30 seconds via a cross-platform (Darwin/Linux) telemetry backend, reads canonical board state in SQLite read-only mode, reconciles exact worker identities, and invokes only supported Hermes CLI commands. It never writes or clears Hermes ESTOP, never signals a worker, and never repairs board rows.
 
 ## Safety model
 
-- Hold immediately for load1 >= logical cores, non-normal native pressure, available memory below 4 GiB, either paging direction, malformed telemetry, first sample, counter reset, time reversal, or a sample gap.
-- Recover only after 120 continuous seconds at load1 <= 0.8 cores, at least 5 GiB available, normal pressure, and no paging.
+- Hold immediately for load1 >= logical cores, non-normal native pressure, available memory below 4 GiB, a swap-out counter increase, malformed/unreadable telemetry, first sample, counter reset, time reversal, or a sample gap. Swap-in growth alone never holds (D1 = A).
+- Recover only after 120 continuous seconds at load1 <= 0.8 cores, at least 5 GiB available, normal pressure, and no swap-out increase.
 - Enforce host admission cap 2, per-profile cap 1, and per-board `dispatch --max 1` after exact process/run reconciliation. Existing excess workers drain naturally.
 - Perform at most one side-effecting command in a recovered window: one decomposition or one dispatch. Every attempted command consumes the window.
 - Predict each board with supported `dispatch --dry-run --max 1`; classify merge-conflict > review > build; use round-robin ties; age a passed board into one admission after six windows. The accepted race is reported as `priority_miss`; policy is explicitly best-effort.
@@ -18,6 +18,7 @@ This standalone Python helper gates automatic Kanban admission without changing 
 ## Repository staging layout
 
 - `resource_controller/`: standalone implementation; no imports from Hermes internals.
+- `resource_controller/telemetry/`: per-OS memory/pressure backend (`darwin.py`, `linux.py`), the shared `MemoryHealth`/`TelemetryError` contract, and named constants (`__init__.py`, `constants.py`).
 - `tests/`: deterministic serial unit/contract tests.
 - `controller.example.json`: uninstalled runtime configuration template.
 - `launchd/ai.hermes.kanban-resource-controller.plist`: uninstalled template only.

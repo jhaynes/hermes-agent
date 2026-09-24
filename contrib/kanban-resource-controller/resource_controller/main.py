@@ -9,6 +9,7 @@ import time
 from typing import Sequence
 
 from .cli_adapter import CliCommands
+from .config import ControllerConfig
 from .engine import ControllerEngine
 from .host import HostSampler
 from .locking import LockContended, SingletonLock
@@ -18,6 +19,8 @@ from .processes import scan_worker_processes
 from .runtime import RuntimeWorld
 from .spec import RuntimeSpec
 from .storage import SecureStateStore
+from .telemetry import TelemetryError, select_backend
+from .telemetry import constants as telemetry_constants
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -44,11 +47,21 @@ def _manual_hold(store: SecureStateStore) -> bool:
 
 
 def _world(spec: RuntimeSpec, store: SecureStateStore) -> RuntimeWorld:
-    sampler = HostSampler()
-
     def config_reader():
         verify_source_baseline(spec.source_root, spec.expected_source_commit)
         return read_kanban_config(spec.hermes_home / "config.yaml")
+
+    # PSI thresholds are read once at process start (HostSampler is built once
+    # per run); this is a deliberate deviation from per-tick config re-reads,
+    # documented in REQUIREMENT_LEDGER section 17.
+    bootstrap_config = ControllerConfig.from_mapping(config_reader())
+    backend_kwargs: dict[str, float] = {}
+    if sys.platform.startswith("linux"):
+        backend_kwargs = {
+            "some_avg10_warning": bootstrap_config.linux_psi_some_avg10_warning,
+            "full_avg10_critical": bootstrap_config.linux_psi_full_avg10_critical,
+        }
+    sampler = HostSampler(backend=select_backend(**backend_kwargs))
 
     return RuntimeWorld(
         boards=spec.boards,
@@ -74,6 +87,7 @@ def _commands(spec: RuntimeSpec, world: RuntimeWorld) -> CliCommands:
 def _check(spec: RuntimeSpec, store: SecureStateStore) -> int:
     snapshot = _world(spec, store).capture()
     print(json.dumps({
+        "schema_version": telemetry_constants.SCHEMA_VERSION,
         "mode": "observation-only",
         "fingerprint": snapshot.fingerprint,
         "estop": snapshot.estop is not None,
@@ -86,8 +100,12 @@ def _check(spec: RuntimeSpec, store: SecureStateStore) -> int:
             "cores": snapshot.sample.cores,
             "available_bytes": snapshot.sample.available_bytes,
             "pressure": snapshot.sample.pressure,
-            "page_in": snapshot.sample.page_in,
-            "page_out": snapshot.sample.page_out,
+            "pressure_detail": dict(snapshot.sample.pressure_detail or {}),
+            "swap_in_bytes": snapshot.sample.swap_in,
+            "swap_out_bytes": snapshot.sample.swap_out,
+            "counter_page_size_bytes": snapshot.sample.counter_page_size_bytes,
+            "units": "bytes",
+            "source": snapshot.sample.source,
         },
     }, sort_keys=True))
     return 0
@@ -124,6 +142,16 @@ def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
                     })
                 else:
                     engine.tick()
+            except TelemetryError as exc:
+                engine.policy.invalidate()
+                store.write_json("status.json", {
+                    "schema_version": telemetry_constants.SCHEMA_VERSION,
+                    "mode": "best-effort downstream-first",
+                    "reason": telemetry_constants.REASON_TELEMETRY_ERROR,
+                    "error_code": exc.error_code,
+                    "diagnostic": exc.diagnostic,
+                    "manual_hold": _manual_hold(store),
+                })
             except Exception as exc:
                 store.write_json("status.json", {
                     "mode": "best-effort downstream-first",

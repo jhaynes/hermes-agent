@@ -62,6 +62,10 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 - `resource_controller/spec.py`
 - `resource_controller/storage.py`
 - `resource_controller/supervision.py`
+- `resource_controller/telemetry/__init__.py` — `MemoryHealth`/`TelemetryError` contract and `select_backend`
+- `resource_controller/telemetry/constants.py` — named reason/source/pressure/schema-version/error constants
+- `resource_controller/telemetry/darwin.py` — real `vm_stat` Swapins/Swapouts parser and backend (no `psutil.swap_memory`)
+- `resource_controller/telemetry/linux.py` — `/proc/vmstat`, `/proc/meminfo`, `/proc/pressure/memory` parser and backend
 
 ### Serial deterministic tests
 
@@ -79,6 +83,12 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 - `tests/test_runtime.py`
 - `tests/test_sandbox_cli_e2e.py`
 - `tests/test_spec.py`
+- `tests/test_telemetry.py` — Darwin/Linux parser, backend selection, PSI threshold, telemetry-error, and end-to-end divergent-source regression coverage
+- `tests/fixtures/vm_stat_darwin_16k.txt` — real captured `vm_stat` output, 16 KiB pages
+- `tests/fixtures/vm_stat_darwin_4k.txt` — 4 KiB-page variant
+- `tests/fixtures/proc_vmstat.txt` — real captured `/proc/vmstat`
+- `tests/fixtures/proc_meminfo.txt` — real captured `/proc/meminfo`
+- `tests/fixtures/proc_pressure_memory.txt` — real captured `/proc/pressure/memory`
 
 ## Change manifest by acceptance requirement
 
@@ -93,6 +103,7 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 | Legacy unowned delivery limitation | board inventory/preflight behavior plus explicit historical-only warning in ledger, matrix, and runbook |
 | Rollback and bounded canary | lifecycle/storage behavior, template boundaries, explicit authorization phases and abort criteria in runbook |
 | Immutable package and reproducible evidence | this manifest plus external release receipt/archive hash generated from and tested at the frozen commit |
+| Cross-platform memory telemetry (REQUIREMENT_LEDGER §17) | `resource_controller/telemetry/` package, `host.py`/`policy.py`/`config.py`/`main.py`/`engine.py` updates, `tests/test_telemetry.py`, real Darwin/Linux fixtures |
 
 ## Explicit exclusions
 

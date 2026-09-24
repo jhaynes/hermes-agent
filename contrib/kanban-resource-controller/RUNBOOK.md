@@ -73,15 +73,64 @@ Execute only with separate installation/config/service authorization:
 
 The loop performs no LLM inference. Existing automatic decomposition may use its already configured auxiliary model when enabled.
 
-Every 30 seconds, the helper samples load1, logical cores, available memory, native Darwin pressure, and cumulative page-in/page-out bytes. It holds immediately when load1 is at least the core count, pressure is not normal, memory is below 4 GiB, either paging counter increases, or any sample is missing/malformed/non-finite. First sample, counter reset/decrease, monotonic-time reversal, restart, or a long sample gap resets recovery.
+Every 30 seconds, the helper samples load1, logical cores, available memory, native pressure, and cumulative swap-in/swap-out bytes via a per-OS telemetry backend (see "Cross-platform telemetry (schema 2)" below). It holds immediately when load1 is at least the core count, pressure is not normal, memory is below 4 GiB, the swap-out counter increases, or any sample is missing/malformed/non-finite/a telemetry read failure. Swap-in growth alone never holds or resets admission (D1 = A, recorded amendment; starved on this Mac under strict swap-in gating, since swap-ins were nonzero in 9 of 10 idle samples). First sample, counter reset/decrease, monotonic-time reversal, restart, or a long sample gap resets recovery.
 
-Admission becomes eligible only after 120 uninterrupted seconds with load1 no greater than 0.8 times cores, at least 5 GiB available, normal pressure, and no paging increase. The exact 4 GiB boundary leaves the helper held until the 5 GiB recovery threshold is reached. Every attempted side-effecting command consumes the window and requires a new full recovery dwell.
+Admission becomes eligible only after 120 uninterrupted seconds with load1 no greater than 0.8 times cores, at least 5 GiB available, normal pressure, and no swap-out increase. The exact 4 GiB boundary leaves the helper held until the 5 GiB recovery threshold is reached. Every attempted side-effecting command consumes the window and requires a new full recovery dwell.
 
 Before and immediately before a command, reconcile exact process/run identities and enforce host cap 2, per-profile cap 1, and board concurrency `dispatch --max 1`. Existing excess workers are never killed and drain naturally. Under host pressure, ESTOP, manual hold, capacity, unowned-subscription, incompatible-config, or identity ambiguity, run no dispatch/decompose command.
 
 In an eligible window, issue at most one side-effecting command against one board: one explicit-task decomposition or one dispatch, never both and never `--all`. For dispatch, bounded read-only dry runs predict each board, classify merge-conflict > review > build, apply round-robin ties, and age a passed board into one admission after six eligible windows. This is **best-effort downstream-first**, not a guarantee. If canonical post-command reconciliation differs from the prediction, record one `priority_miss`; never retry, kill, or issue another command in that window.
 
 Timeout, launch failure, nonzero status, output/contract drift, or ambiguous post-command reconciliation writes persistent `uncertain-outcome`. Reconcile the pending journal, captured output, canonical rows, and processes manually. Do not delete/acknowledge evidence or restart admissions merely because the child deadline expired; bounded supervision sends no signal and waits for a finite child to end.
+
+A `TelemetryError` (unreadable/malformed/oversized native counters, an unsupported platform, or — on Linux — PSI unavailable) writes reason `telemetry-error` with a machine-readable `error_code` and a sanitized, single-line, <=300-char `diagnostic` instead of the generic `persistent-operator-hold`. The policy's baseline and recovery dwell are invalidated (no stale counters are ever reused); recovery restarts from the next clean sample once telemetry is healthy again.
+
+## Cross-platform telemetry (schema 2)
+
+Historical bug: the pre-fix code called `psutil.swap_memory().sin/.sout` on Darwin. On macOS, `psutil` actually reports `vm_stat` **Pageins/Pageouts** (file-backed page traffic) through those fields, not real swap activity — so ordinary file I/O falsely looked like swapping and starved admission. Schema 2 fixes this at the root by giving every OS its own backend under `resource_controller/telemetry/`.
+
+- **Darwin:** `/usr/bin/vm_stat` is parsed directly for the real `Swapins:`/`Swapouts:` lines and the page-size header; `psutil.swap_memory` is never called on Darwin. Native pressure still comes from `kern.memorystatus_vm_pressure_level` via `sysctl`.
+- **Linux:** `/proc/vmstat` (`pswpin`/`pswpout`, multiplied by `os.sysconf("SC_PAGE_SIZE")`), `/proc/meminfo` (`MemAvailable`), and `/proc/pressure/memory` (PSI) are read directly, each capped at 64 KiB, no subprocesses. PSI mapping defaults (D2): `full avg10 > 0.0` is critical, otherwise `some avg10 >= 10.0` is warning, otherwise normal. Override the defaults only via an optional `controller.json` section:
+
+  ```json
+  {"telemetry": {"linux_psi": {"some_avg10_warning": 10.0, "full_avg10_critical": 0.0}}}
+  ```
+
+  An absent `telemetry` or `telemetry.linux_psi` section uses the defaults above — the Mac deployment's `controller.json` stays byte-identical. Values must be finite numbers in [0, 100]; unknown keys refuse like every other setting.
+- **Linux without PSI** (D3, fail closed): `ENOENT`/`EOPNOTSUPP` reading `/proc/pressure/memory` raises `TelemetryError` with `error_code = "psi-unavailable"`, surfaced as `reason: telemetry-error`. Enable PSI (`psi=1` on the kernel command line, or the distro equivalent) rather than deploying with pressure disabled; there is no degraded fallback.
+- **Container caveat:** Linux `/proc/pressure/memory` reflects the cgroup/container the controller runs in, not necessarily the physical host. This package is documented and intended to run directly on the host (launchd-only on macOS today); a future Linux deployment must run on bare metal or a privileged/host-PID container to get host-wide PSI.
+
+### schema 1 -> schema 2 field mapping
+
+| schema 1 field | schema 2 field | notes |
+| --- | --- | --- |
+| `sample.page_in` | `sample.swap_in_bytes` | Darwin: real `vm_stat` Swapins × page size (was `psutil` Pageins bug). Linux: `pswpin` × `SC_PAGE_SIZE`. |
+| `sample.page_out` | `sample.swap_out_bytes` | Darwin: real `vm_stat` Swapouts × page size (was `psutil` Pageouts bug — the gating counter). Linux: `pswpout` × `SC_PAGE_SIZE`. |
+| (absent) | `sample.counter_page_size_bytes` | Native page size used for the byte conversion above. |
+| (absent) | `sample.units` | Always `"bytes"`; documents that the two fields above are already byte counts. |
+| (absent) | `sample.source` | `"darwin-vm_stat+sysctl"` or `"linux-proc"`. |
+| (absent) | `sample.pressure_detail` | Darwin: `{"level": <1|2|4>}`. Linux: PSI `some_avg10/some_avg60/full_avg10/full_avg60`. |
+| (absent) | `swap_in_delta_bytes`, `swap_out_delta_bytes` | Non-negative deltas since the previous status write; `null` on the first sample or after a counter reset. Swap-in deltas are reported for diagnosis only and never gate admission (D1 = A). |
+| (absent) | `sample_wall_time`, `interval_seconds`, `telemetry_age_seconds` | Wall-clock timestamp of the write, monotonic gap from the previous sample, and staleness, for diagnosing a stuck loop. |
+| `pressure` (`normal`/`warning`/`critical`) | `pressure` | Unchanged enum values across the schema bump and across OSes. |
+
+`status.json`/`check` gain a top-level `"schema_version": 2` key; schema 1 output carried no such key, so its absence is itself the schema-1 signal.
+
+### Raw `vm_stat` / `/proc` comparison procedure (either OS)
+
+To independently confirm the reported counters against the OS, without trusting the helper:
+
+1. **Darwin:** run `vm_stat` yourself immediately before and immediately after a `check`/status sample, each with a timestamp. Read the raw `Swapins:`/`Swapouts:` cumulative counts (not `psutil`). The helper's reported `swap_in_bytes`/`swap_out_bytes` must fall between the before and after readings (before <= helper <= after) once both are expressed in bytes at the same page size — an exact-equality match is not expected because the two samples aren't simultaneous.
+2. **Linux:** run `cat /proc/vmstat | grep -E 'pswpin|pswpout'` before and after, similarly bracketing the helper's `swap_in_bytes`/`swap_out_bytes` (divided by `getconf PAGE_SIZE` to compare page counts, or multiply the raw counters by the same page size to compare bytes).
+3. A large `Pageins`/file-cache delta with flat `Swapouts` (e.g. `cat` a few GiB of files to `/dev/null`) must **not** move the helper's `swap_out_bytes` or trigger a `swap-out` hold — this is the specific regression this fix targets.
+
+### Linux prerequisites (future deployment; not part of this Mac rollout)
+
+- Kernel PSI enabled (`CONFIG_PSI=y` and `psi=1` if gated at boot) so `/proc/pressure/memory` exists — otherwise the backend fails closed with `psi-unavailable` (D3).
+- The controller must run directly on the host, not inside a container, so `/proc/pressure/memory` reflects real host memory pressure rather than a cgroup's view (see the container caveat above).
+- This package and its launchd plist are macOS/launchd-only today. Nothing here is a Linux deployment or activation plan — the Linux backend and Linux CI gate exist so the code is portable and covered, not because Linux rollout is authorized. Any future Linux service supervisor, packaging, or install path is separate, unauthorized work.
+
+
 
 ## Hold, recovery, and safe shutdown
 

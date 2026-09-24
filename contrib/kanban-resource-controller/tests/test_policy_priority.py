@@ -16,16 +16,16 @@ def sample(
     cores: int = 10,
     available: int = 6 * GIB,
     pressure: str = "normal",
-    page_in: int = 100,
-    page_out: int = 100,
+    swap_in: int = 100,
+    swap_out: int = 100,
 ) -> HostSample:
-    return HostSample(now, load1, cores, available, pressure, page_in, page_out)
+    return HostSample(now, load1, cores, available, pressure, swap_in, swap_out)
 
 
 class AdmissionPolicyTests(unittest.TestCase):
     def test_first_sample_holds_then_full_quiet_dwell_recovers(self) -> None:
         policy = AdmissionPolicy(recovery_seconds=120, max_sample_gap=35)
-        self.assertEqual(policy.observe(sample(0)).reason, "paging-baseline")
+        self.assertEqual(policy.observe(sample(0)).reason, "swap-baseline")
         self.assertEqual(policy.observe(sample(30)).reason, "recovery-dwell")
         self.assertEqual(policy.observe(sample(119)).reason, "sample-gap")
 
@@ -40,8 +40,7 @@ class AdmissionPolicyTests(unittest.TestCase):
             (sample(30, available=4 * GIB - 1), "memory"),
             (sample(30, pressure="warning"), "pressure"),
             (sample(30, pressure="critical"), "pressure"),
-            (sample(30, page_in=101), "paging"),
-            (sample(30, page_out=101), "paging"),
+            (sample(30, swap_out=101), "swap-out"),
         ]
         for current, reason in cases:
             with self.subTest(reason=reason, current=current):
@@ -49,8 +48,13 @@ class AdmissionPolicyTests(unittest.TestCase):
                 policy.observe(sample(0))
                 self.assertEqual(policy.observe(current).reason, reason)
 
+        # D1 = A: swap-in growth alone never gates.
+        policy = AdmissionPolicy(recovery_seconds=120, max_sample_gap=35)
+        policy.observe(sample(0))
+        self.assertEqual(policy.observe(sample(30, swap_in=200)).reason, "recovery-dwell")
+
         policy = AdmissionPolicy(recovery_seconds=30, max_sample_gap=35)
-        self.assertEqual(policy.observe(sample(0, available=4 * GIB)).reason, "paging-baseline")
+        self.assertEqual(policy.observe(sample(0, available=4 * GIB)).reason, "swap-baseline")
         self.assertEqual(
             policy.observe(sample(30, available=4 * GIB)).reason,
             "recovery-memory",
@@ -73,15 +77,15 @@ class AdmissionPolicyTests(unittest.TestCase):
                 self.assertEqual(policy.observe(current).reason, "unknown-telemetry")
 
         policy = AdmissionPolicy()
-        policy.observe(sample(0, page_in=100))
-        self.assertEqual(policy.observe(sample(30, page_in=99)).reason, "paging-reset")
-        self.assertEqual(policy.observe(sample(20, page_in=99)).reason, "nonmonotonic-time")
+        policy.observe(sample(0, swap_in=100))
+        self.assertEqual(policy.observe(sample(30, swap_in=99)).reason, "swap-reset")
+        self.assertEqual(policy.observe(sample(20, swap_in=99)).reason, "nonmonotonic-time")
 
         policy = AdmissionPolicy(recovery_seconds=30, max_sample_gap=35)
-        policy.observe(sample(0, page_out=100))
-        self.assertEqual(policy.observe(sample(30, page_out=99)).reason, "paging-reset")
-        self.assertEqual(policy.observe(sample(60, page_out=99)).reason, "recovery-dwell")
-        self.assertTrue(policy.observe(sample(90, page_out=99)).eligible)
+        policy.observe(sample(0, swap_out=100))
+        self.assertEqual(policy.observe(sample(30, swap_out=99)).reason, "swap-reset")
+        self.assertEqual(policy.observe(sample(60, swap_out=99)).reason, "recovery-dwell")
+        self.assertTrue(policy.observe(sample(90, swap_out=99)).eligible)
 
     def test_recovery_requires_strict_recovery_band_and_command_resets_it(self) -> None:
         policy = AdmissionPolicy(recovery_seconds=120, max_sample_gap=35)
@@ -92,6 +96,20 @@ class AdmissionPolicyTests(unittest.TestCase):
         self.assertTrue(result.eligible)
         policy.command_consumed(180)
         self.assertEqual(policy.observe(sample(210)).reason, "recovery-dwell")
+
+    def test_invalidate_clears_baseline_and_dwell(self) -> None:
+        policy = AdmissionPolicy(recovery_seconds=120, max_sample_gap=35)
+        for now in (0, 30, 60):
+            policy.observe(sample(now))
+        policy.invalidate()
+        self.assertEqual(policy.observe(sample(90)).reason, "swap-baseline")
+
+    def test_swap_out_growth_holds_but_swap_in_growth_alone_never_does(self) -> None:
+        policy = AdmissionPolicy(recovery_seconds=120, max_sample_gap=35)
+        policy.observe(sample(0, swap_in=100, swap_out=100))
+        # A huge swap-in delta with flat swap-out must not gate under D1=A.
+        result = policy.observe(sample(30, swap_in=999_999, swap_out=100))
+        self.assertNotEqual(result.reason, "swap-out")
 
 
 class PriorityTests(unittest.TestCase):

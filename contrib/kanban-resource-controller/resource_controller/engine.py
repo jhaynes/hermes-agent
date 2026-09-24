@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import time
 from typing import Mapping, Protocol, Sequence
 
 from .config import ControllerConfig
@@ -8,6 +9,7 @@ from .inventory import LiveWorker, admission_capacity
 from .policy import AdmissionPolicy, HostSample
 from .priority import PredictedPick, select_pick
 from .storage import SecureStateStore
+from .telemetry import constants as telemetry_constants
 
 
 @dataclass(frozen=True)
@@ -69,17 +71,19 @@ class ControllerEngine:
         self.pointer = 0
         self.passed: dict[str, int] = {}
         self.priority_misses = 0
+        self._previous_sample: HostSample | None = None
+        self._previous_wall_time: float | None = None
 
     def tick(self) -> TickResult:
         if self.store.has_pending_uncertainty():
-            return self._result("uncertain-outcome")
+            return self._result("uncertain-outcome", sample=None)
         initial = self.world.capture()
         health = self.policy.observe(initial.sample)
         if not health.eligible:
-            return self._result(health.reason)
+            return self._result(health.reason, sample=initial.sample, observed_blockers=health.observed_blockers)
         hold = self._common_hold(initial)
         if hold:
-            return self._result(hold)
+            return self._result(hold, sample=initial.sample, observed_blockers=health.observed_blockers)
 
         decomposition = self._choose_decomposition(initial)
         if decomposition is not None:
@@ -102,7 +106,7 @@ class ControllerEngine:
                 continue
         if not predictions:
             self.pointer = (self.pointer + 1) % len(initial.boards)
-            return self._result("prediction-unavailable")
+            return self._result("prediction-unavailable", sample=initial.sample, observed_blockers=health.observed_blockers)
         order = [board.board for board in initial.boards]
         selection = select_pick(
             predictions,
@@ -114,7 +118,7 @@ class ControllerEngine:
         pick = selection.pick
         capacity = admission_capacity(initial.workers, board=pick.board, profile=pick.assignee or "")
         if not capacity.available:
-            return self._result(capacity.reason)
+            return self._result(capacity.reason, sample=initial.sample, observed_blockers=health.observed_blockers)
         return self._execute(
             initial,
             kind="dispatch",
@@ -165,17 +169,17 @@ class ControllerEngine:
         final = self.world.capture()
         final_health = self.policy.observe(final.sample)
         if not final_health.eligible:
-            return self._result(final_health.reason)
+            return self._result(final_health.reason, sample=final.sample, observed_blockers=final_health.observed_blockers)
         if final.fingerprint != initial.fingerprint:
-            return self._result("precommand-race")
+            return self._result("precommand-race", sample=final.sample, observed_blockers=final_health.observed_blockers)
         hold = self._common_hold(final)
         if hold:
-            return self._result(hold)
+            return self._result(hold, sample=final.sample, observed_blockers=final_health.observed_blockers)
         if kind == "dispatch":
             assert profile is not None and predicted is not None
             capacity = admission_capacity(final.workers, board=board, profile=profile)
             if not capacity.available:
-                return self._result(capacity.reason)
+                return self._result(capacity.reason, sample=final.sample, observed_blockers=final_health.observed_blockers)
 
         if selection_passed is not None:
             self.passed = selection_passed
@@ -194,29 +198,66 @@ class ControllerEngine:
             else:
                 outcome = self.commands.dispatch(predicted, final.config.failure_limit)  # type: ignore[arg-type]
         except BaseException:
-            return self._result("uncertain-outcome")
+            return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
         if outcome.uncertain:
-            return self._result("uncertain-outcome")
+            return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
 
         journal["outcome"] = "reconciled"
         journal["actual_task_id"] = outcome.actual_task_id
         self.store.write_json("pending.json", journal)
         if kind == "dispatch" and outcome.actual_task_id not in (None, task_id):
             self.priority_misses += 1
-            return self._result("priority-miss")
+            return self._result("priority-miss", sample=final.sample, observed_blockers=final_health.observed_blockers)
         if kind == "decompose":
-            return self._result("decomposed")
-        return self._result("dispatched" if outcome.actual_task_id else "dispatch-noop")
-
-    def _result(self, reason: str) -> TickResult:
-        self.store.write_json(
-            "status.json",
-            {
-                "mode": "best-effort downstream-first",
-                "reason": reason,
-                "priority_misses": self.priority_misses,
-                "passed_windows": self.passed,
-                "round_robin_pointer": self.pointer,
-            },
+            return self._result("decomposed", sample=final.sample, observed_blockers=final_health.observed_blockers)
+        return self._result(
+            "dispatched" if outcome.actual_task_id else "dispatch-noop",
+            sample=final.sample,
+            observed_blockers=final_health.observed_blockers,
         )
+
+    def _result(
+        self,
+        reason: str,
+        *,
+        sample: HostSample | None = None,
+        observed_blockers: tuple[str, ...] = (),
+    ) -> TickResult:
+        payload: dict[str, object] = {
+            "schema_version": telemetry_constants.SCHEMA_VERSION,
+            "mode": "best-effort downstream-first",
+            "reason": reason,
+            "priority_misses": self.priority_misses,
+            "passed_windows": self.passed,
+            "round_robin_pointer": self.pointer,
+            "observed_blockers": list(observed_blockers),
+        }
+        if sample is not None:
+            wall_time = time.time()
+            interval_seconds = None
+            swap_in_delta = None
+            swap_out_delta = None
+            if self._previous_sample is not None:
+                interval_seconds = sample.monotonic - self._previous_sample.monotonic
+                if sample.swap_in >= self._previous_sample.swap_in:
+                    swap_in_delta = sample.swap_in - self._previous_sample.swap_in
+                if sample.swap_out >= self._previous_sample.swap_out:
+                    swap_out_delta = sample.swap_out - self._previous_sample.swap_out
+            payload.update({
+                "pressure": sample.pressure,
+                "pressure_detail": dict(sample.pressure_detail or {}),
+                "swap_in_bytes": sample.swap_in,
+                "swap_out_bytes": sample.swap_out,
+                "counter_page_size_bytes": sample.counter_page_size_bytes,
+                "units": "bytes",
+                "source": sample.source,
+                "swap_in_delta_bytes": swap_in_delta,
+                "swap_out_delta_bytes": swap_out_delta,
+                "sample_wall_time": wall_time,
+                "interval_seconds": interval_seconds,
+                "telemetry_age_seconds": 0.0,
+            })
+            self._previous_sample = sample
+            self._previous_wall_time = wall_time
+        self.store.write_json("status.json", payload)
         return TickResult(reason, self.priority_misses)
