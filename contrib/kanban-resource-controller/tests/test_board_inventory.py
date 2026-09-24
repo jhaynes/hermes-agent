@@ -86,6 +86,17 @@ class BoardInventoryTests(unittest.TestCase):
             with self.assertRaisesRegex(BoardInventoryError, "symlink"):
                 read_board_inventory(link, board="alpha", max_rows=10)
 
+    def test_null_fingerprint_with_live_pid_holds(self) -> None:
+        for table, where in (("tasks", "id='t_live'"), ("task_runs", "id=7")):
+            with self.subTest(table=table), tempfile.TemporaryDirectory() as root:
+                path = self.make_db(root)
+                connection = sqlite3.connect(path)
+                connection.execute(f"UPDATE {table} SET worker_started_at=NULL WHERE {where}")
+                connection.commit()
+                connection.close()
+                with self.assertRaisesRegex(BoardInventoryError, "incomplete active identity for t_live"):
+                    read_board_inventory(path, board="alpha", max_rows=10)
+
     def test_unverified_fingerprint_holds(self) -> None:
         with tempfile.TemporaryDirectory() as root:
             path = self.make_db(root)

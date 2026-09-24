@@ -106,6 +106,20 @@ If `check`/`status` reports an `identity-*` hold (malformed, unverified, mismatc
 4. `identity-unstable`: almost always a genuinely short-lived/exiting process caught mid-transition; the controller already retried once. Persisting past that is diagnostic, not actionable by the helper.
 5. Never patch around a hold by reintroducing int-cast comparison, epoch-less matching, or a tolerance window — those are the specific mutants proven-killed in `tests/test_worker_identity.py`; reintroducing any of them silently reopens the PID-reuse hole this amendment closed.
 
+### Pending-journal recovery after an `uncertain-outcome` (MoA v1 decision 8)
+
+`uncertain-outcome` persists while `state/pending.json` has any `outcome` other than `reconciled`; the engine runs no command until then. Resolve it only with evidence, never by deleting the journal.
+
+1. `hold --reason "<why>"`, then `launchctl bootout gui/$UID/ai.hermes.kanban-resource-controller`. Wait for the controller PID to exit and confirm the dispatcher lock has no holder (`lsof -t <dispatcher_lock>` empty) before touching state. A manual hold alone does not stop a running loop from reading or writing the journal.
+2. Record evidence for the journal's `board`/`task_id` (read-only `mode=ro` queries): the task row (`status`, `worker_pid`, `worker_started_at`, `current_run_id`), the run row, the `spawned` event, and — if the PID is alive — its argv, the `HERMES_KANBAN_TASK`/`HERMES_KANBAN_RUN_ID`/`HERMES_KANBAN_BOARD`/`HERMES_PROFILE` markers, and pinned Hermes `_process_fingerprint(pid)` compared with the stored value. Record only these markers, not the full environment.
+3. Decide by worker state:
+   - **Still running**, markers match the journal task, fingerprint equals the stored row, and it is the board's only worker: the command started exactly the predicted task. Proceed with `actual_task_id` = that task.
+   - **Finished**: the task row has `worker_pid` NULL and the journal's run is terminal (`task_runs.status`/`outcome` set, `ended_at` present), and the `spawned` event names the journal task. Proceed with `actual_task_id` = that task; the evidence stands without a live PID.
+   - **Anything else** (a PID alive with a different fingerprint, markers for another task, several workers on the board, no `spawned` event, rows that disagree): stop. Keep the hold, leave the journal untouched, and escalate to the release owner.
+4. Copy the original bytes: `cp -p state/pending.json <checkpoint>/pending-<UTC timestamp>-original.json`, and record its `shasum -a 256` in the incident record.
+5. Rewrite the journal atomically using the package's own writer (`SecureStateStore(<state_dir>).write_json("pending.json", ...)`, which does mkstemp 0600, fsync, `os.replace` and a directory fsync), keeping the original keys and setting `outcome: "reconciled"`, `actual_task_id`, `reconciled_by`, `evidence` (path to the recorded evidence) and `at` (epoch seconds). Verify that `has_pending_uncertainty()` now returns false.
+6. Bootstrap with the hold still engaged. Confirm `check` reports the expected workers with no identity hold before `resume`.
+
 ## Cross-platform telemetry (schema 2)
 
 Historical bug: the pre-fix code called `psutil.swap_memory().sin/.sout` on Darwin. On macOS, `psutil` actually reports `vm_stat` **Pageins/Pageouts** (file-backed page traffic) through those fields, not real swap activity — so ordinary file I/O falsely looked like swapping and starved admission. Schema 2 fixes this at the root by giving every OS its own backend under `resource_controller/telemetry/`.

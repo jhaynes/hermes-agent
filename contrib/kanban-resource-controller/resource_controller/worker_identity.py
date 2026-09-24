@@ -175,24 +175,6 @@ def current_fingerprint(
     return f"{epoch}|{start}"
 
 
-def capture_stable_fingerprint(
-    pid: int, *, epoch: str, read_text=None, create_time_fn=None, alive_fn=None
-) -> str:
-    """Read the current process's fingerprint twice — once before and once after
-    the caller collects argv/env — with one recapture on instability, per MoA v1
-    decision 4. Callers pass this same function for both reads so the "recapture
-    once" budget is shared across the whole snapshot, OR call it twice themselves
-    and compare via :func:`fingerprints_agree`. This helper alone does a single
-    read; ``processes.py`` is the actual two-read call site (before/after argv+env
-    collection) since only it knows the timing of that collection.
-    """
-    return current_fingerprint(pid, epoch=epoch, read_text=read_text, create_time_fn=create_time_fn)
-
-
-def fingerprints_agree(before: str, after: str) -> bool:
-    return before == after
-
-
 def matches(stored: StoredFingerprint, current: str) -> bool:
     """Exact string equality of ``f"{epoch}|{start}"`` against the raw stored
     string, per ``_pid_recycled``'s composite branch (MoA v1 decision 2: no

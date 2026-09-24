@@ -88,6 +88,8 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 - `tests/test_worker_identity.py` — worker start-fingerprint contract: composite parse, golden value, epoch port, Linux/Darwin start-time parity, exact-string match
 - `tests/test_contract_gate.py` — mandatory release-gate: real child process, fingerprint written by pinned Hermes `_process_fingerprint`, verified against pinned commit
 - `scripts/contract_gate.py` — mandatory pre-install gate script; fails (not skips) if `HERMES_SOURCE_ROOT` is unset
+- `tests/test_processes.py` — start-fingerprint bracketing of the environment read, recapture, `identity-unstable`
+- `tests/test_contract_gate_script.py` — the gate script's own control logic (missing env, HEAD pin, skips, empty/failed runs)
 - `tests/fixtures/vm_stat_darwin_16k.txt` — real captured `vm_stat` output, 16 KiB pages
 - `tests/fixtures/vm_stat_darwin_4k.txt` — 4 KiB-page variant
 - `tests/fixtures/proc_vmstat.txt` — real captured `/proc/vmstat`

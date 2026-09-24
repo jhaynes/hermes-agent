@@ -78,6 +78,29 @@ class ParseStoredFingerprintTests(unittest.TestCase):
         with self.assertRaises(IdentityMalformed):
             parse_stored_fingerprint("x" * 10_000 + "|1")
 
+    def test_oversized_string_never_reaches_the_regex(self) -> None:
+        from resource_controller import worker_identity
+
+        sentinel = unittest.mock.Mock()
+        sentinel.fullmatch.side_effect = AssertionError("regex must not see oversized input")
+        with unittest.mock.patch.object(worker_identity, "_COMPOSITE_RE", sentinel):
+            with self.assertRaises(IdentityMalformed):
+                parse_stored_fingerprint("|" + "1" * 10_000)
+        sentinel.fullmatch.assert_not_called()
+
+    def test_darwin_rounding_uses_the_same_builtin_round_as_pinned_hermes(self) -> None:
+        # Pinned gateway/status.py: int(round(psutil.Process(pid).create_time() * 100)).
+        # Exact-half centisecond values round half-to-even in both implementations.
+        from resource_controller.worker_identity import _darwin_process_start
+
+        for create_time in (0.125, 0.135, 1790274116.815, 1790274116.825, 1790274116.812699):
+            with self.subTest(create_time=create_time):
+                pinned_expression = int(round(create_time * 100))
+                self.assertEqual(
+                    _darwin_process_start(1, create_time_fn=lambda _pid, t=create_time: t),
+                    pinned_expression,
+                )
+
     def test_empty_string_rejected(self) -> None:
         with self.assertRaises(IdentityMalformed):
             parse_stored_fingerprint("")
