@@ -109,6 +109,7 @@ class CliContractTests(unittest.TestCase):
             "skipped_nonspawnable": [],
             "skipped_per_profile_capped": [],
             "auto_assigned_default": [],
+            "reaped_terminal_workers": [], "respawn_guarded": [], "rate_limited": [], "skipped_locked": False, "memory_pressure": None,
         }
         parsed = parse_dispatch_prediction(json.dumps(payload), board="team", titles={"t_1": "Review"})
         self.assertEqual(parsed.task_id, "t_1")
@@ -133,6 +134,7 @@ class CliContractTests(unittest.TestCase):
             "spawned": [{"task_id": "t_1", "assignee": "default", "workspace": None}],
             "skipped_unassigned": [], "skipped_nonspawnable": [],
             "skipped_per_profile_capped": [], "auto_assigned_default": [],
+            "reaped_terminal_workers": [], "respawn_guarded": [], "rate_limited": [], "skipped_locked": False, "memory_pressure": None,
         }
         with self.assertRaisesRegex(CommandContractError, "maintenance"):
             parse_dispatch_prediction(json.dumps(payload), board="team", titles={"t_1": "Build"})

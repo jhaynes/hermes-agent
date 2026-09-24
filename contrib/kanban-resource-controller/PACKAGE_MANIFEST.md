@@ -71,6 +71,7 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 - `tests/test_engine.py`
 - `tests/test_host_lifecycle.py`
 - `tests/test_inventory.py`
+- `tests/test_live_cli_contract.py`
 - `tests/test_lock_storage_supervision.py`
 - `tests/test_main.py`
 - `tests/test_policy_priority.py`

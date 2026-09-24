@@ -35,6 +35,8 @@ class SandboxedCliTests(unittest.TestCase):
                         "spawned": [{{"task_id": "t_pred", "assignee": "reviewquality", "workspace": "scratch"}}],
                         "skipped_unassigned": [], "skipped_nonspawnable": [],
                         "skipped_per_profile_capped": [], "auto_assigned_default": [],
+                        "reaped_terminal_workers": [], "respawn_guarded": [], "rate_limited": [],
+                        "skipped_locked": False, "memory_pressure": None,
                     }}
                     if "decompose" in sys.argv:
                         task_id = sys.argv[sys.argv.index("decompose") + 1]

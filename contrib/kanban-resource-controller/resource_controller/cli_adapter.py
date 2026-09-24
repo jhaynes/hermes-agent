@@ -10,6 +10,7 @@ from .cli_contract import (
     build_dispatch_command,
     build_dry_run_command,
     parse_dispatch_prediction,
+    validate_dispatch_payload,
 )
 from .engine import BoardView, CommandOutcome
 from .priority import PredictedPick
@@ -18,11 +19,6 @@ from .supervision import CommandResult, run_supervised
 Runner = Callable[[list[str], float, int], CommandResult]
 ReconcileActual = Callable[[str, str], Optional[str]]
 
-_DISPATCH_KEYS = {
-    "reclaimed", "crashed", "timed_out", "stale", "auto_blocked", "promoted",
-    "spawned", "skipped_unassigned", "skipped_nonspawnable",
-    "skipped_per_profile_capped", "auto_assigned_default",
-}
 _DECOMPOSE_KEYS = {"task_id", "ok", "reason", "fanout", "child_ids", "new_title"}
 
 
@@ -100,10 +96,10 @@ class CliCommands:
 
 def _valid_dispatch_json(output: str) -> bool:
     try:
-        payload = json.loads(output)
-    except json.JSONDecodeError:
+        payload = validate_dispatch_payload(output)
+    except CommandContractError:
         return False
-    if not isinstance(payload, dict) or set(payload) != _DISPATCH_KEYS:
+    if payload["skipped_locked"]:
+        # A second dispatcher owned the tick: dual authority, never a clean miss.
         return False
-    spawned = payload.get("spawned")
-    return isinstance(spawned, list) and len(spawned) <= 1
+    return len(payload["spawned"]) <= 1

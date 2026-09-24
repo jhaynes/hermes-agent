@@ -24,6 +24,7 @@ class CliAdapterTests(unittest.TestCase):
                     "spawned": [{"task_id": "t_1", "assignee": "reviewscope", "workspace": None}],
                     "skipped_unassigned": [], "skipped_nonspawnable": [],
                     "skipped_per_profile_capped": [], "auto_assigned_default": [],
+            "reaped_terminal_workers": [], "respawn_guarded": [], "rate_limited": [], "skipped_locked": False, "memory_pressure": None,
                 }
             elif "decompose" in argv:
                 payload = {
@@ -37,6 +38,7 @@ class CliAdapterTests(unittest.TestCase):
                     "spawned": [{"task_id": "t_1", "assignee": "reviewscope", "workspace": None}],
                     "skipped_unassigned": [], "skipped_nonspawnable": [],
                     "skipped_per_profile_capped": [], "auto_assigned_default": [],
+            "reaped_terminal_workers": [], "respawn_guarded": [], "rate_limited": [], "skipped_locked": False, "memory_pressure": None,
                 }
             return CommandResult(tuple(argv), 0, json.dumps(payload), "", False, False)
 

@@ -9,7 +9,7 @@ All automated tests run serially. `PASS` below means implemented unit/contract c
 | T-003 recovery dwell/gaps/cooldown | PASS | `test_first_sample_holds_then_full_quiet_dwell_recovers`, `test_recovery_requires_strict_recovery_band_and_command_resets_it`, `test_completed_command_consumes_the_full_recovery_window` cover exact 120 seconds, gaps, restart/counter reset, and post-command cooldown |
 | T-004 unknown telemetry | PASS | policy and `test_host_lifecycle.HostSamplerTests` |
 | T-005 singleton/CLOEXEC | PASS | `test_lock_storage_supervision.SingletonLockTests` |
-| T-006 incompatible config/source | PASS | `test_config_cli.ConfigContractTests`, `test_preflight.PreflightTests`, `test_spec.RuntimeSpecTests` |
+| T-006 incompatible config/source | PASS | `test_config_cli.ConfigContractTests`, `test_live_cli_contract`, `test_preflight.PreflightTests`, `test_spec.RuntimeSpecTests` |
 | T-007 one-task decomposition | PASS | CLI contract/adapter and engine decomposition tests plus `test_sandbox_cli_e2e` prove an explicit task, never `--all` |
 | T-008 dispatch/caps/--max1 | PASS (isolated) | `test_capacity_is_host_profile_and_board_admission_only`, engine limit holds, and sandboxed executable argv receipt prove host 2/profile 1/board `--max 1` without production dispatch |
 | T-009 one command/window | PASS | decomposition/dispatch/uncertainty tests and `test_completed_command_consumes_the_full_recovery_window` |
