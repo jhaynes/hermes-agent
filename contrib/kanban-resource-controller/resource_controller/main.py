@@ -92,6 +92,11 @@ def _check(spec: RuntimeSpec, store: SecureStateStore) -> int:
         "workers": len(snapshot.workers),
         "boards": [board.board for board in snapshot.boards],
         "unowned_subscriptions": snapshot.unowned_subscriptions,
+        "identity": {
+            "contract": "composite-only worker_started_at f'{epoch}|{start}', exact string match",
+            "pinned_hermes_commit": "0e0a29ad315da6b6fd5b63e2903600af85e839e5",
+            "workers_verified": len(snapshot.workers),
+        },
         "sample": {
             "load1": snapshot.sample.load1,
             "cores": snapshot.sample.cores,

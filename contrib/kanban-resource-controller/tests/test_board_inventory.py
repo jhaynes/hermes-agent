@@ -13,13 +13,16 @@ _SCHEMA = """
 CREATE TABLE tasks (
  id TEXT PRIMARY KEY, title TEXT NOT NULL, assignee TEXT, status TEXT NOT NULL,
  priority INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
- worker_pid INTEGER, worker_started_at INTEGER, current_run_id INTEGER
+ worker_pid INTEGER, worker_started_at TEXT, current_run_id INTEGER
 );
 CREATE TABLE task_runs (
- id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT, status TEXT NOT NULL
+ id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT, status TEXT NOT NULL,
+ worker_pid INTEGER, worker_started_at TEXT
 );
 CREATE TABLE kanban_notify_subs (task_id TEXT, notifier_profile TEXT);
 """
+
+FINGERPRINT = "|179027411681"
 
 
 class BoardInventoryTests(unittest.TestCase):
@@ -29,9 +32,12 @@ class BoardInventoryTests(unittest.TestCase):
         connection.executescript(_SCHEMA)
         connection.execute(
             "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
-            ("t_live", "Build", "builder", "done", 0, 1, 42, 1000, 7),
+            ("t_live", "Build", "builder", "done", 0, 1, 42, FINGERPRINT, 7),
         )
-        connection.execute("INSERT INTO task_runs VALUES (?,?,?,?)", (7, "t_live", "builder", "running"))
+        connection.execute(
+            "INSERT INTO task_runs VALUES (?,?,?,?,?,?)",
+            (7, "t_live", "builder", "running", 42, FINGERPRINT),
+        )
         connection.execute(
             "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
             ("t_ready", "Review changes", "reviewscope", "ready", 0, 2, None, None, None),
@@ -51,6 +57,7 @@ class BoardInventoryTests(unittest.TestCase):
             self.assertEqual(snapshot.titles, {"t_ready": "Review changes"})
             self.assertEqual(snapshot.assignees, {"t_ready": "reviewscope"})
             self.assertEqual(snapshot.runs[0].task_status, "done")
+            self.assertEqual(snapshot.runs[0].worker_fingerprint.raw, FINGERPRINT)
             self.assertEqual(snapshot.unowned_subscriptions, 0)
 
     def test_unowned_subscription_and_schema_or_row_drift_hold(self) -> None:
@@ -78,6 +85,55 @@ class BoardInventoryTests(unittest.TestCase):
             link.symlink_to(path)
             with self.assertRaisesRegex(BoardInventoryError, "symlink"):
                 read_board_inventory(link, board="alpha", max_rows=10)
+
+    def test_unverified_fingerprint_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "UPDATE tasks SET worker_started_at='unverified' WHERE id='t_live'"
+            )
+            connection.execute(
+                "UPDATE task_runs SET worker_started_at='unverified' WHERE id=7"
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(BoardInventoryError, "board inventory failed"):
+                read_board_inventory(path, board="alpha", max_rows=10)
+
+    def test_tasks_vs_task_runs_fingerprint_conflict_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "UPDATE task_runs SET worker_started_at='|999999' WHERE id=7"
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(BoardInventoryError, "identity-conflict"):
+                read_board_inventory(path, board="alpha", max_rows=10)
+
+    def test_tasks_vs_task_runs_pid_conflict_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE task_runs SET worker_pid=99 WHERE id=7")
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(BoardInventoryError, "identity-conflict"):
+                read_board_inventory(path, board="alpha", max_rows=10)
+
+    def test_malformed_fingerprint_holds_not_bare_valueerror(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE tasks SET worker_started_at=1000 WHERE id='t_live'")
+            connection.execute("UPDATE task_runs SET worker_started_at=1000 WHERE id=7")
+            connection.commit()
+            connection.close()
+            with self.assertRaises(BoardInventoryError) as ctx:
+                read_board_inventory(path, board="alpha", max_rows=10)
+            self.assertNotEqual(type(ctx.exception.__cause__), ValueError)
 
 
 if __name__ == "__main__":

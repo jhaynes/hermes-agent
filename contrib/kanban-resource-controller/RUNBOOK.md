@@ -85,6 +85,27 @@ Timeout, launch failure, nonzero status, output/contract drift, or ambiguous pos
 
 A `TelemetryError` (unreadable/malformed/oversized native counters, an unsupported platform, or — on Linux — PSI unavailable) writes reason `telemetry-error` with a machine-readable `error_code` and a sanitized, single-line, <=300-char `diagnostic` instead of the generic `persistent-operator-hold`. The policy's baseline and recovery dwell are invalidated (no stale counters are ever reused); recovery restarts from the next clean sample once telemetry is healthy again.
 
+## Worker start-fingerprint identity contract (REQUIREMENT_LEDGER §18)
+
+The controller must recognize `tasks.worker_started_at`/`task_runs.worker_started_at` exactly as pinned Hermes (`0e0a29ad315da6b6fd5b63e2903600af85e839e5`) writes them. `resource_controller/worker_identity.py` is the single owner of this contract; every other module imports from it rather than re-deriving parsing/matching logic.
+
+- **Format:** the only values a live writer produces are the literal string `"unverified"` or a composite `f"{epoch}|{start}"` where `epoch` is `current_instantiation_epoch()` (`gateway/drain_control.py`, `f"{boot_id}:{pid1_start}"`, possibly a partial/empty string) and `start` is the process start-time fingerprint (`gateway/status.py::_get_process_start_time`: Linux `/proc/<pid>/stat` field 22 via `.split()[21]`; Darwin `psutil.Process(pid).create_time()` scaled to centiseconds and rounded). There is no integer form and no NULL form on any live path — both are rejected as `identity-malformed`.
+- **Match semantics:** exact string equality of the stored raw value against the controller's own `f"{epoch}|{start}"` for the candidate process — never an `int()` cast, never a tolerance window. A one-tick difference in the start-time fingerprint is a real mismatch (PID reuse), not noise.
+- **Cross-row check:** the controller reads both the `tasks` row and the current `task_runs` row and requires them to agree (fingerprint and pid); disagreement is `identity-conflict`, a hold — this is new; the pre-fix query never read the `task_runs`-side columns and could not detect drift between the two rows.
+- **Stability:** the controller reads its own candidate process's start fingerprint twice — once before and once after collecting its argv/environment — with a single recapture allowed on disagreement; a second disagreement is `identity-unstable`.
+- **Platforms:** darwin and linux only; anything else is `identity-unsupported-platform`.
+- **Mandatory pre-install gate:** run `HERMES_SOURCE_ROOT=<path-to-pinned-hermes-checkout> <venv>/bin/python scripts/contract_gate.py` before installing/activating any build. It fails hard (exit 1, not a skip) if `HERMES_SOURCE_ROOT` is unset, and it verifies `git -C "$HERMES_SOURCE_ROOT" rev-parse HEAD` equals `0e0a29ad315da6b6fd5b63e2903600af85e839e5` before importing anything from it. The ordinary hermetic `unittest discover -s tests` run skips these 2 tests cleanly (by design) when the env var is absent — it is not a substitute for the gate.
+
+### Incident recovery procedure (identity holds)
+
+If `check`/`status` reports an `identity-*` hold (malformed, unverified, mismatch, unavailable, conflict, unstable, unsupported-platform):
+
+1. Do not clear the hold by widening the parser or match semantics — that is exactly the class of regression the mutation-tested suite (REQUIREMENT_LEDGER §18) exists to catch. Re-run `scripts/contract_gate.py` against the currently installed Hermes source first, to rule out an actual upstream contract drift (a real Hermes upgrade that changed `_process_fingerprint`/`_get_process_start_time`).
+2. If the gate still passes (contract unchanged), read the specific hold reason and offending `task_id`/`run_id` from the controller's log/status output, then read the raw `worker_started_at` value directly from the board (read-only `mode=ro` query) for that row before concluding it's corrupt data versus a real live PID-reuse race.
+3. `identity-conflict` (tasks vs task_runs disagree): treat as a stale/desynced row, not an emergency — the controller already refuses to admit new work against it. Escalate to the release owner for manual DB reconciliation; the helper does not repair rows itself (§8.2).
+4. `identity-unstable`: almost always a genuinely short-lived/exiting process caught mid-transition; the controller already retried once. Persisting past that is diagnostic, not actionable by the helper.
+5. Never patch around a hold by reintroducing int-cast comparison, epoch-less matching, or a tolerance window — those are the specific mutants proven-killed in `tests/test_worker_identity.py`; reintroducing any of them silently reopens the PID-reuse hole this amendment closed.
+
 ## Cross-platform telemetry (schema 2)
 
 Historical bug: the pre-fix code called `psutil.swap_memory().sin/.sout` on Darwin. On macOS, `psutil` actually reports `vm_stat` **Pageins/Pageouts** (file-backed page traffic) through those fields, not real swap activity — so ordinary file I/O falsely looked like swapping and starved admission. Schema 2 fixes this at the root by giving every OS its own backend under `resource_controller/telemetry/`.

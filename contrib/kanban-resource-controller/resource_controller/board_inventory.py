@@ -8,6 +8,7 @@ from typing import Mapping
 from urllib.parse import quote
 
 from .inventory import CanonicalRun
+from .worker_identity import IdentityHold, require_consistent
 
 
 class BoardInventoryError(RuntimeError):
@@ -64,7 +65,8 @@ def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> B
         run_rows = connection.execute(
             "SELECT t.id AS task_id, t.status AS task_status, t.worker_pid, "
             "t.worker_started_at, t.current_run_id, t.assignee, r.id AS run_id, "
-            "r.task_id AS run_task_id, r.profile "
+            "r.task_id AS run_task_id, r.profile, r.worker_pid AS run_worker_pid, "
+            "r.worker_started_at AS run_worker_started_at "
             "FROM tasks t LEFT JOIN task_runs r ON r.id = t.current_run_id "
             "WHERE t.worker_pid IS NOT NULL"
         ).fetchall()
@@ -78,6 +80,8 @@ def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> B
             ).fetchone()[0]
         )
     except (sqlite3.Error, KeyError, TypeError, ValueError) as exc:
+        raise BoardInventoryError(f"board inventory failed: {exc}") from exc
+    except IdentityHold as exc:
         raise BoardInventoryError(f"board inventory failed: {exc}") from exc
     finally:
         if connection is not None:
@@ -105,7 +109,10 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
 
 
 def _canonical_run(row: sqlite3.Row, board: str) -> CanonicalRun:
-    required = ("worker_pid", "worker_started_at", "current_run_id", "run_id", "run_task_id")
+    required = (
+        "worker_pid", "worker_started_at", "current_run_id", "run_id", "run_task_id",
+        "run_worker_pid", "run_worker_started_at",
+    )
     if any(row[key] is None for key in required):
         raise BoardInventoryError(f"incomplete active identity for {row['task_id']}")
     if row["run_id"] != row["current_run_id"] or row["run_task_id"] != row["task_id"]:
@@ -113,12 +120,17 @@ def _canonical_run(row: sqlite3.Row, board: str) -> CanonicalRun:
     profile = row["profile"] or row["assignee"]
     if not isinstance(profile, str) or not profile:
         raise BoardInventoryError(f"active run profile missing for {row['task_id']}")
+    fingerprint = require_consistent(
+        row["worker_started_at"], row["worker_pid"],
+        row["run_worker_started_at"], row["run_worker_pid"],
+        context=f"{row['task_id']}/{row['run_id']}",
+    )
     return CanonicalRun(
         board=board,
         task_id=row["task_id"],
         run_id=int(row["run_id"]),
         pid=int(row["worker_pid"]),
-        worker_started_at=int(row["worker_started_at"]),
+        worker_fingerprint=fingerprint,
         profile=profile,
         task_status=row["task_status"],
     )

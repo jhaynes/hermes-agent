@@ -4,9 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Mapping, Sequence
 
-
-class IdentityHold(RuntimeError):
-    pass
+from .worker_identity import IdentityHold, StoredFingerprint, matches
 
 
 _TASK_PATTERN = re.compile(r"^t_[A-Za-z0-9]+$")
@@ -68,7 +66,7 @@ class CanonicalRun:
     task_id: str
     run_id: int
     pid: int
-    worker_started_at: int
+    worker_fingerprint: StoredFingerprint
     profile: str
     task_status: str
 
@@ -81,6 +79,7 @@ class ProcessSnapshot:
     argv: tuple[str, ...]
     environment: Mapping[str, str]
     accessible: bool
+    start_fingerprint: int | None = None
 
 
 @dataclass(frozen=True)
@@ -103,13 +102,15 @@ class Capacity:
 def reconcile_workers(
     runs: Sequence[CanonicalRun],
     processes: Sequence[ProcessSnapshot],
+    *,
+    epoch: str = "",
 ) -> list[LiveWorker]:
     by_pid: dict[int, CanonicalRun] = {}
-    identities: set[tuple[int, int]] = set()
+    identities: set[tuple[int, str]] = set()
     for run in runs:
         if run.pid in by_pid:
             raise IdentityHold(f"duplicate canonical pid {run.pid}")
-        identity = (run.pid, run.worker_started_at)
+        identity = (run.pid, run.worker_fingerprint.raw)
         if identity in identities:
             raise IdentityHold("duplicate process identity")
         identities.add(identity)
@@ -132,8 +133,11 @@ def reconcile_workers(
             raise IdentityHold(f"worker process {process.pid} has no canonical run")
         if process.pid in matched:
             raise IdentityHold(f"duplicate process snapshot {process.pid}")
-        if int(process.created_at) != run.worker_started_at:
-            raise IdentityHold(f"PID reuse for {process.pid}")
+        if process.start_fingerprint is None:
+            raise IdentityHold(f"identity-unavailable: worker process {process.pid} start time unreadable")
+        current = f"{epoch}|{process.start_fingerprint}"
+        if not matches(run.worker_fingerprint, current):
+            raise IdentityHold(f"identity-mismatch: PID reuse for {process.pid}")
         expected = {
             "HERMES_KANBAN_TASK": run.task_id,
             "HERMES_KANBAN_RUN_ID": str(run.run_id),

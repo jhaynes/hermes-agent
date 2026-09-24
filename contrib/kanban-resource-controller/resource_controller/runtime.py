@@ -11,6 +11,7 @@ from .config import ControllerConfig
 from .engine import BoardView, GateSnapshot
 from .inventory import ProcessSnapshot, reconcile_workers
 from .policy import HostSample
+from .worker_identity import current_instantiation_epoch
 
 
 class RuntimeWorld:
@@ -45,7 +46,8 @@ class RuntimeWorld:
             for slug in sorted(self._boards)
         ]
         runs = tuple(run for snapshot in snapshots for run in snapshot.runs)
-        workers = tuple(reconcile_workers(runs, self._process_reader()))
+        epoch = current_instantiation_epoch()
+        workers = tuple(reconcile_workers(runs, self._process_reader(), epoch=epoch))
         boards = tuple(
             BoardView(
                 snapshot.board,

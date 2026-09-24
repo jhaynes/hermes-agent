@@ -66,6 +66,7 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 - `resource_controller/telemetry/constants.py` — named reason/source/pressure/schema-version/error constants
 - `resource_controller/telemetry/darwin.py` — real `vm_stat` Swapins/Swapouts parser and backend (no `psutil.swap_memory`)
 - `resource_controller/telemetry/linux.py` — `/proc/vmstat`, `/proc/meminfo`, `/proc/pressure/memory` parser and backend
+- `resource_controller/worker_identity.py` — single owner of the pinned Hermes worker start-fingerprint contract (composite-only parse, exact-string match, `IdentityHold` subclasses)
 
 ### Serial deterministic tests
 
@@ -84,6 +85,9 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 - `tests/test_sandbox_cli_e2e.py`
 - `tests/test_spec.py`
 - `tests/test_telemetry.py` — Darwin/Linux parser, backend selection, PSI threshold, telemetry-error, and end-to-end divergent-source regression coverage
+- `tests/test_worker_identity.py` — worker start-fingerprint contract: composite parse, golden value, epoch port, Linux/Darwin start-time parity, exact-string match
+- `tests/test_contract_gate.py` — mandatory release-gate: real child process, fingerprint written by pinned Hermes `_process_fingerprint`, verified against pinned commit
+- `scripts/contract_gate.py` — mandatory pre-install gate script; fails (not skips) if `HERMES_SOURCE_ROOT` is unset
 - `tests/fixtures/vm_stat_darwin_16k.txt` — real captured `vm_stat` output, 16 KiB pages
 - `tests/fixtures/vm_stat_darwin_4k.txt` — 4 KiB-page variant
 - `tests/fixtures/proc_vmstat.txt` — real captured `/proc/vmstat`
@@ -104,6 +108,7 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 | Rollback and bounded canary | lifecycle/storage behavior, template boundaries, explicit authorization phases and abort criteria in runbook |
 | Immutable package and reproducible evidence | this manifest plus external release receipt/archive hash generated from and tested at the frozen commit |
 | Cross-platform memory telemetry (REQUIREMENT_LEDGER §17) | `resource_controller/telemetry/` package, `host.py`/`policy.py`/`spec.py`/`main.py`/`engine.py` updates, `tests/test_telemetry.py`, real Darwin/Linux fixtures |
+| Worker start-fingerprint identity (REQUIREMENT_LEDGER §18) | `resource_controller/worker_identity.py`, `board_inventory.py`/`inventory.py`/`processes.py`/`runtime.py`/`main.py` updates, `tests/test_worker_identity.py`, mandatory `scripts/contract_gate.py` + `tests/test_contract_gate.py` against pinned Hermes |
 
 ## Explicit exclusions
 

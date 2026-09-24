@@ -21,9 +21,12 @@ class RuntimeWorldTests(unittest.TestCase):
                 CREATE TABLE tasks (
                   id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
                   priority INTEGER, created_at INTEGER, worker_pid INTEGER,
-                  worker_started_at INTEGER, current_run_id INTEGER
+                  worker_started_at TEXT, current_run_id INTEGER
                 );
-                CREATE TABLE task_runs (id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, status TEXT);
+                CREATE TABLE task_runs (
+                  id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, status TEXT,
+                  worker_pid INTEGER, worker_started_at TEXT
+                );
                 CREATE TABLE kanban_notify_subs (task_id TEXT, notifier_profile TEXT);
             """)
             connection.execute(
