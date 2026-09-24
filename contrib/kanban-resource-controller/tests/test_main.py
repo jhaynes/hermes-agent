@@ -1,15 +1,23 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
+import json
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
+from resource_controller.config import ConfigCompatibilityError
 from resource_controller.engine import ControllerEngine, GateSnapshot
-from resource_controller.main import build_parser, run_iteration, set_manual_hold
+from resource_controller.main import _check, build_parser, run_iteration, set_manual_hold
+from resource_controller.inventory import LiveWorker
 from resource_controller.policy import AdmissionPolicy, HostSample
 from resource_controller.storage import SecureStateStore
 from resource_controller.telemetry import TelemetryError
 from resource_controller.telemetry import constants
+from resource_controller.spec import AdmissionCaps
 
 from test_engine import FakeCommands, config
 
@@ -98,6 +106,48 @@ class RunLoopTelemetryTests(unittest.TestCase):
             engine = self._engine(root, world)
             run_iteration(engine, world, engine.store, stopping=False)
             self.assertEqual(engine.store.read_json("status.json")["reason"], "persistent-operator-hold")
+
+
+class CheckOutputTests(unittest.TestCase):
+    def test_check_reports_effective_caps_expected_observed_counts_and_offender(self) -> None:
+        caps = AdmissionCaps(4, 1, (), 1, (("smithers", 4),))
+        workers = (
+            LiveWorker("smithers", "t_1", 1, 10, 1.0, "builder", "running"),
+            LiveWorker("smithers", "t_2", 2, 11, 2.0, "builder", "running"),
+        )
+        board = SimpleNamespace(board="smithers", hermes_db_running_count=1)
+        state = GateSnapshot(
+            "fingerprint", _sample(1), config(caps=caps), None, False,
+            workers, (board,), 0,
+        )
+        spec = SimpleNamespace(admission_caps=caps, hermes_home=Path("/unused"))
+        output = io.StringIO()
+        with mock.patch("resource_controller.main._world", return_value=SimpleNamespace(capture=lambda: state)), redirect_stdout(output):
+            self.assertEqual(_check(spec, mock.Mock()), 0)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(payload["admission"]["host_cap"], 4)
+        self.assertEqual(payload["admission"]["expected_hermes"], payload["admission"]["observed_hermes"])
+        self.assertEqual(payload["boards"]["smithers"]["hermes_db_running_count"], 1)
+        self.assertEqual(payload["boards"]["smithers"]["controller_reconciled_live_count"], 2)
+        self.assertEqual(payload["admission"]["cap_violation"]["name"], "builder")
+
+    def test_check_makes_hermes_cap_mismatch_obvious(self) -> None:
+        caps = AdmissionCaps(4, 1, (), 1, ())
+        spec = SimpleNamespace(admission_caps=caps, hermes_home=Path("/unused"))
+        failing = SimpleNamespace(capture=mock.Mock(side_effect=ConfigCompatibilityError("max_in_progress must be exactly 4")))
+        output = io.StringIO()
+        with (
+            mock.patch("resource_controller.main._world", return_value=failing),
+            mock.patch("resource_controller.main.read_kanban_config", return_value={
+                "max_in_progress": 2, "max_in_progress_per_profile": 1,
+            }),
+            redirect_stdout(output),
+        ):
+            self.assertEqual(_check(spec, mock.Mock()), 1)
+        payload = json.loads(output.getvalue())
+        self.assertFalse(payload["compatible"])
+        self.assertEqual(payload["expected_hermes"]["kanban.max_in_progress"], 4)
+        self.assertEqual(payload["observed_hermes"]["kanban.max_in_progress"], 2)
 
 
 class MainSurfaceTests(unittest.TestCase):

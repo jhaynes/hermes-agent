@@ -6,7 +6,17 @@
   "dispatcher_lock": "/ABSOLUTE/PATH/TO/.hermes/kanban/.dispatcher.lock",
   "state_dir": "/ABSOLUTE/PATH/TO/.hermes/operations/kanban-resource-controller/state",
   "boards": {
-    "default": "/ABSOLUTE/PATH/TO/.hermes/kanban.db"
+    "default": "/ABSOLUTE/PATH/TO/.hermes/kanban.db",
+    "smithers": "/ABSOLUTE/PATH/TO/.hermes/boards/smithers/kanban.db"
+  },
+  "admission": {
+    "host_cap": 4,
+    "profile_cap": 1,
+    "profile_overrides": {},
+    "board_cap": 1,
+    "board_overrides": {
+      "smithers": 4
+    }
   },
   "interval_seconds": 30
 }

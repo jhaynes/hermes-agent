@@ -29,6 +29,76 @@ class RuntimeSpecTests(unittest.TestCase):
             spec = RuntimeSpec.read(config)
             self.assertEqual(spec.expected_source_commit, "a" * 40)
             self.assertEqual(spec.interval_seconds, 30)
+            self.assertEqual(spec.admission_caps.host_cap, 2)
+            self.assertEqual(spec.admission_caps.profile_cap, 1)
+            self.assertEqual(spec.admission_caps.board_cap, 1)
+
+    def test_nondefault_admission_caps_and_overrides_are_parsed(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            source = base / "source"
+            source.mkdir()
+            config = base / "controller.json"
+            config.write_text(json.dumps({
+                "hermes_executable": str(base / "hermes"),
+                "hermes_home": str(base / "home"),
+                "source_root": str(source),
+                "expected_source_commit": "a" * 40,
+                "dispatcher_lock": str(base / "lock"),
+                "state_dir": str(base / "state"),
+                "boards": {"default": str(base / "default.db"), "smithers": str(base / "smithers.db")},
+                "interval_seconds": 30,
+                "admission": {
+                    "host_cap": 4,
+                    "profile_cap": 1,
+                    "profile_overrides": {"builder": 2},
+                    "board_cap": 1,
+                    "board_overrides": {"smithers": 4},
+                },
+            }))
+            config.chmod(0o600)
+            caps = RuntimeSpec.read(config).admission_caps
+            self.assertEqual(caps.for_profile("builder"), 2)
+            self.assertEqual(caps.for_profile("reviewer"), 1)
+            self.assertEqual(caps.for_board("smithers"), 4)
+            self.assertEqual(caps.for_board("default"), 1)
+
+    def test_invalid_admission_values_and_unknown_boards_are_refused(self) -> None:
+        invalid = [
+            None,
+            {"host_cap": 0},
+            {"host_cap": True},
+            {"profile_cap": 5},
+            {"profile_overrides": {"builder": 5}},
+            {"board_overrides": {"unknown": 2}},
+            {"profile_overrides": []},
+            {"extra": 1},
+        ]
+        for admission in invalid:
+            with self.subTest(admission=admission), tempfile.TemporaryDirectory() as root:
+                base = Path(root)
+                source = base / "source"
+                source.mkdir()
+                raw = {
+                    "hermes_executable": str(base / "hermes"),
+                    "hermes_home": str(base / "home"),
+                    "source_root": str(source),
+                    "expected_source_commit": "a" * 40,
+                    "dispatcher_lock": str(base / "lock"),
+                    "state_dir": str(base / "state"),
+                    "boards": {"default": str(base / "default.db")},
+                    "interval_seconds": 30,
+                    "admission": None if admission is None else {
+                        "host_cap": 4, "profile_cap": 1,
+                        "profile_overrides": {}, "board_cap": 1, "board_overrides": {},
+                        **admission,
+                    },
+                }
+                path = base / "controller.json"
+                path.write_text(json.dumps(raw))
+                path.chmod(0o600)
+                with self.assertRaises(SpecError):
+                    RuntimeSpec.read(path)
 
     def test_relative_or_in_source_state_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as root:

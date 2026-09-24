@@ -34,8 +34,9 @@ Before any operational step:
 `check` and preflight must validate the effective **default-profile** contract before `run` is considered:
 
 - `dispatch_in_gateway` is explicitly false, and no enabled old gateway still owns dispatch;
-- `kanban.max_in_progress` is exactly 2;
-- per-profile concurrency is exactly 1;
+- `kanban.max_in_progress` exactly equals `controller.json admission.host_cap`;
+- `kanban.max_in_progress_per_profile` exactly equals the largest of `admission.profile_cap` and every profile override;
+- `kanban.dispatch_profiles` is an explicit nonempty, duplicate-free list containing every profile override name; absent, null, and `[]` all refuse;
 - orphan reconciliation is enabled;
 - `dispatch_stale_timeout_seconds` is exactly 0 until supported parity exists;
 - the configured Hermes source commit and CLI JSON contracts match the reviewed baseline;
@@ -60,14 +61,32 @@ The helper and gateway coordinate through the same `.dispatcher.lock` for their 
 
 Execute only with separate installation/config/service authorization:
 
-1. Extract the verified archive to a versioned per-user operations directory outside installed Hermes source, for example `$HERMES_HOME/operations/kanban-resource-controller/<artifact-sha256>/`. Never copy it into the retained Hermes checkout or mutate installed Hermes source.
-2. Create a distinct 0700 runtime-state directory. Create `controller.json` mode 0600 from `controller.example.json`, replacing every placeholder with reviewed absolute paths and the expected retained Hermes **source** commit (not the helper package commit).
-3. Use the supported Hermes config interface for approved default-profile values. Record before/after receipts and prior unset state. Make no named-profile changes.
-   The helper reads raw `config.yaml`, not CLI-resolved defaults, so every contract key must be written explicitly even where it equals the Hermes default: `kanban.max_in_progress 2`, `kanban.max_in_progress_per_profile 1`, `kanban.dispatch_stale_timeout_seconds 0`, `kanban.failure_limit`, `kanban.reconcile_orphans true`, `kanban.review_dispatch`, `kanban.auto_decompose`, `kanban.default_assignee`, `kanban.dispatch_profiles null`, and `kanban.dispatch_in_gateway false`. A missing key is a refusal by design.
-4. Run observation-only `check`. It must report source/config/schema compatibility, honest live pressure, exact workers/descendants, all boards, and zero unowned subscriptions. Fixture recovery is not live recovery proof.
-5. Render the reviewed plist with absolute paths but do not load it until B-004 passes, the old gateway lacks dispatcher capability, and the shared lock is available.
-6. Load the LaunchAgent only in a separately authorized window. Keep the helper manually held. Confirm restrictive artifact/state modes, one service instance, the expected executable/import root, fresh status, bounded logs, and lock ownership.
-7. Do not remove any old package. Package removal is a separate operation allowed only after retained-runtime, service, board-integrity, notification, and rollback proof.
+1. **Before installing the new binary**, inspect raw default-profile `kanban.dispatch_profiles`. If it is absent, null, empty, duplicated, or omits a profile override, stop. Record an explicit audited list and obtain separate config-change authorization; do not install first and hope `check` catches it.
+2. Extract the verified archive to a versioned per-user operations directory outside installed Hermes source, for example `$HERMES_HOME/operations/kanban-resource-controller/<artifact-sha256>/`. Never copy it into the retained Hermes checkout or mutate installed Hermes source.
+3. Create a distinct 0700 runtime-state directory. Create `controller.json` mode 0600 from `controller.example.json`, replacing every placeholder with reviewed absolute paths and the expected retained Hermes **source** commit (not the helper package commit). Its admission block is the approved proposed example: host 4, profile 1 with no override, board 1 with `smithers` 4; it is not evidence that production has those values.
+4. Use the supported Hermes config interface for approved default-profile values. Record before/after receipts and prior unset state. Make no named-profile changes.
+   The helper reads raw `config.yaml`, not CLI-resolved defaults, so every contract key must be written explicitly even where it equals the Hermes default: `kanban.max_in_progress` equal to `admission.host_cap`, `kanban.max_in_progress_per_profile` equal to the largest effective profile cap, `kanban.dispatch_stale_timeout_seconds 0`, `kanban.failure_limit`, `kanban.reconcile_orphans true`, `kanban.review_dispatch`, `kanban.auto_decompose`, `kanban.default_assignee`, an explicit audited nonempty `kanban.dispatch_profiles` list, and `kanban.dispatch_in_gateway false`. A missing key is a refusal by design.
+5. Run observation-only `check`. It must report source/config/schema compatibility, honest live pressure, exact workers/descendants, all boards, and zero unowned subscriptions. Fixture recovery is not live recovery proof.
+6. Render the reviewed plist with absolute paths but do not load it until B-004 passes, the old gateway lacks dispatcher capability, and the shared lock is available.
+7. Load the LaunchAgent only in a separately authorized window. Keep the helper manually held. Confirm restrictive artifact/state modes, one service instance, the expected executable/import root, fresh status, bounded logs, and lock ownership.
+8. Do not remove any old package. Package removal is a separate operation allowed only after retained-runtime, service, board-integrity, notification, and rollback proof.
+
+## Change the caps
+
+All controller admission numbers live together under `controller.json.admission`: `host_cap`, `profile_cap`, `profile_overrides`, `board_cap`, and `board_overrides`. Values are positive integers; effective profile caps cannot exceed `host_cap`; board override names must exist in `boards`; profile override names must exist in the explicit `kanban.dispatch_profiles` registry. An omitted whole `admission` section uses backward-compatible 2/1/1 with empty override maps. Never duplicate these values in code or another controller file.
+
+Coordinate the Hermes defense-in-depth keys: `kanban.max_in_progress = admission.host_cap`; `kanban.max_in_progress_per_profile = max(admission.profile_cap, all profile override values)`. Hermes's global profile value can be broader than a controller-only stricter profile cap. Hermes preventively bounds only its host/global-profile limits and board `m`; the controller verifies its stricter limits after a race and enters persistent uncertainty on a violation.
+
+Use this exact authorized sequence: **hold → stop → edit → check → restart → resume**.
+
+1. `hold --reason "change admission caps"`; wait for any command to finish, then stop the service safely and preserve the dispatcher lock/journals.
+2. Edit all five `controller.json.admission` keys together. If a profile override is added/removed, edit the explicit `kanban.dispatch_profiles` registry in the same held change. Edit the two matching Hermes keys above; preserve before/after receipts.
+3. Run observation-only `check` while stopped. A mismatch is nonzero and explicit, for example:
+
+       {"compatible":false,"error":"max_in_progress must be exactly 4","expected_hermes":{"kanban.max_in_progress":4,"kanban.max_in_progress_per_profile":1},"observed_hermes":{"kanban.max_in_progress":2,"kanban.max_in_progress_per_profile":1}}
+
+   Do not restart or resume until `compatible` is true and the output shows effective host/profile/board caps, both `hermes_db_running_count` and `controller_reconciled_live_count`, matching expected/observed Hermes values, and no offending profile/board/count.
+4. Restart held, repeat `check`, observe a fresh full recovery dwell, then `resume --reason "admission caps verified"`. Never live-edit a running controller: `RuntimeSpec` is read once at process start.
 
 ## Admission policy and normal operation
 
@@ -77,9 +96,9 @@ Every 30 seconds, the helper samples load1, logical cores, available memory, nat
 
 Admission becomes eligible only after 120 uninterrupted seconds with load1 no greater than 0.8 times cores, at least 5 GiB available, normal pressure, and no swap-out increase. The exact 4 GiB boundary leaves the helper held until the 5 GiB recovery threshold is reached. Every attempted side-effecting command consumes the window and requires a new full recovery dwell.
 
-Before and immediately before a command, reconcile exact process/run identities and enforce host cap 2, per-profile cap 1, and board concurrency `dispatch --max 1`. Existing excess workers are never killed and drain naturally. Under host pressure, ESTOP, manual hold, capacity, unowned-subscription, incompatible-config, or identity ambiguity, run no dispatch/decompose command.
+Before and immediately before a command, reconcile exact process/run identities and apply the effective controller host/profile/board caps. Existing excess workers are never killed and drain naturally. Hermes preventively bounds a race by its host cap, global profile cap, and the selected board's `m`; a stricter controller-only override is verified after the command, not claimed as preventively enforced. A violation is persistent uncertainty: keep workers running, kill nothing, and stop admission for operator disposition.
 
-In an eligible window, issue at most one side-effecting command against one board: one explicit-task decomposition or one dispatch, never both and never `--all`. For dispatch, bounded read-only dry runs predict each board, classify merge-conflict > review > build, apply round-robin ties, and age a passed board into one admission after six eligible windows. This is **best-effort downstream-first**, not a guarantee. If canonical post-command reconciliation differs from the prediction, record one `priority_miss`; never retry, kill, or issue another command in that window.
+In an eligible window, issue at most one **mutating** command against one board: one explicit-task decomposition or one dispatch, never both and never `--all`; read-only dry runs do not count. For dispatch, bounded read-only dry runs predict each board, classify merge-conflict > review > build, apply round-robin ties, and age a passed board into one admission after six eligible windows. This is **best-effort downstream-first**, not a guarantee. If canonical post-command reconciliation differs from the prediction, record one `priority_miss`; never retry, kill, or issue another command in that window.
 
 Timeout, launch failure, nonzero status, output/contract drift, or ambiguous post-command reconciliation writes persistent `uncertain-outcome`. Reconcile the pending journal, captured output, canonical rows, and processes manually. Do not delete/acknowledge evidence or restart admissions merely because the child deadline expired; bounded supervision sends no signal and waits for a finite child to end.
 
@@ -112,12 +131,9 @@ If `check`/`status` reports an `identity-*` hold (malformed, unverified, mismatc
 
 1. `hold --reason "<why>"`, then `launchctl bootout gui/$UID/ai.hermes.kanban-resource-controller`. Wait for the controller PID to exit and confirm the dispatcher lock has no holder (`lsof -t <dispatcher_lock>` empty) before touching state. A manual hold alone does not stop a running loop from reading or writing the journal.
 2. Record evidence for the journal's `board`/`task_id` (read-only `mode=ro` queries): the task row (`status`, `worker_pid`, `worker_started_at`, `current_run_id`), the run row, the `spawned` event, and — if the PID is alive — its argv, the `HERMES_KANBAN_TASK`/`HERMES_KANBAN_RUN_ID`/`HERMES_KANBAN_BOARD`/`HERMES_PROFILE` markers, and pinned Hermes `_process_fingerprint(pid)` compared with the stored value. Record only these markers, not the full environment.
-3. Decide by worker state:
-   - **Still running**, markers match the journal task, fingerprint equals the stored row, and it is the board's only worker: the command started exactly the predicted task. Proceed with `actual_task_id` = that task.
-   - **Finished**: the task row has `worker_pid` NULL and the journal's run is terminal (`task_runs.status`/`outcome` set, `ended_at` present), and the `spawned` event names the journal task. Proceed with `actual_task_id` = that task; the evidence stands without a live PID.
-   - **Anything else** (a PID alive with a different fingerprint, markers for another task, several workers on the board, no `spawned` event, rows that disagree): stop. Keep the hold, leave the journal untouched, and escalate to the release owner.
+3. Reconcile every ordered CLI command row, not only the prediction. For each actual id require the exact task id + run id + full worker identity contract; require the post-minus-pre identity set to equal the command rows exactly; allow a baseline worker that finished during the command; and recompute host plus every effective profile/board count. Record any violation as profile/board/host, name, observed count, and cap. Wait for natural drain; never kill a worker to satisfy a cap. Any unrelated arrival, missing/exited-before-verification worker, malformed identity, set mismatch, or cap violation remains uncertain.
 4. Copy the original bytes: `cp -p state/pending.json <checkpoint>/pending-<UTC timestamp>-original.json`, and record its `shasum -a 256` in the incident record.
-5. Rewrite the journal atomically using the package's own writer (`SecureStateStore(<state_dir>).write_json("pending.json", ...)`, which does mkstemp 0600, fsync, `os.replace` and a directory fsync), keeping the original keys and setting `outcome: "reconciled"`, `actual_task_id`, `reconciled_by`, `evidence` (path to the recorded evidence) and `at` (epoch seconds). Verify that `has_pending_uncertainty()` now returns false.
+5. Rewrite the journal atomically using the package's own writer (`SecureStateStore(<state_dir>).write_json("pending.json", ...)`, which does mkstemp 0600, fsync, `os.replace` and a directory fsync), keeping the original keys and setting `outcome: "reconciled"`, ordered `actual_task_ids`, scalar `actual_task_id` equal to its first id (or null for a verified no-op), `extra_starts`, `reconciled_by`, `evidence` (path to the recorded evidence) and `at` (epoch seconds). Verify that `has_pending_uncertainty()` now returns false. Restart held and require a full recovery dwell before resume.
 6. Bootstrap with the hold still engaged. Confirm `check` reports the expected workers with no identity hold before `resume`.
 
 ## Cross-platform telemetry (schema 2)
@@ -185,8 +201,8 @@ Use a temporary isolated HOME/HERMES_HOME, synthetic board database, harmless fi
 1. incompatible config and second lock owner refuse safely;
 2. pressure, ESTOP, manual hold, each capacity cap, unowned subscription, and identity ambiguity produce zero starts;
 3. first sample plus the complete 120-second recovery interval is required;
-4. one eligibility window produces at most one side-effecting command;
-5. board `--max 1`, exact task/worker identity, decomposition-by-explicit-id, priority selection, aging, and `priority_miss` behavior match the requirement matrix;
+4. one eligibility window produces at most one mutating command (read-only dry runs excluded);
+5. computed selected-board `m`, exact task/run/worker identity, decomposition-by-explicit-id, priority selection, aging, and `priority_miss` behavior match the requirement matrix;
 6. timeout sends no signal, tracks/drains the finite child, and persists uncertainty;
 7. shutdown refuses while any command, worker, known descendant, or unknown coalition member remains.
 
@@ -208,10 +224,11 @@ Rollback is admission-safe, not availability-first:
 
 1. Engage helper hold and preserve status, logs, receipts, and pending journals.
 2. Drain commands, workers, descendants, and coalition members naturally; unknown state blocks unload.
-3. Leave embedded gateway dispatch disabled while failure or ambiguity remains. An idle queue is safer than dual dispatch.
-4. After a proven safe service exit, restore only the exact previously reviewed plist/artifact or leave the helper offline.
-5. If returning dispatch to the gateway, restore every exact prior default-profile value—including removing keys previously unset—through supported CLI. Restart only after all affected work drains and exclusive lock ownership is proven.
-6. Re-verify board integrity, service exclusivity, process ancestry, notification routing, and exact config receipts before considering rollback complete.
+3. Require `pending.json.outcome == "reconciled"`, checkpoint the complete state directory, and archive/remove `status.json` before starting the old binary so old status tooling cannot present additive multi-start fields as its own output.
+4. Leave embedded gateway dispatch disabled while failure or ambiguity remains. An idle queue is safer than dual dispatch.
+5. After a proven safe service exit, restore the exact prior controller JSON together with the previously reviewed plist/artifact, or leave the helper offline. Never run the old binary against the new unknown `admission` key.
+6. If returning dispatch to the gateway, restore every exact prior default-profile value—including removing keys previously unset—through supported CLI. Restart only after all affected work drains and exclusive lock ownership is proven.
+7. Re-verify board integrity, service exclusivity, process ancestry, notification routing, and exact config receipts before considering rollback complete.
 
 Rollback never clears Hermes ESTOP, deletes uncertain evidence, removes board state/worktrees, force-terminates workers, activates the prior load-adaptive branch, changes named profiles, or uninstalls the retained package.
 

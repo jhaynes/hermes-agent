@@ -55,6 +55,23 @@ class SecureStorageTests(unittest.TestCase):
             store.write_json("pending.json", {"command": ["hermes"], "outcome": "reconciled"})
             self.assertFalse(store.has_pending_uncertainty())
 
+    def test_old_reader_contract_accepts_dual_written_reconciled_journal_only(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = SecureStateStore(Path(root) / "state")
+            new_receipt = {
+                "outcome": "reconciled",
+                "actual_task_id": "t_1",
+                "actual_task_ids": ["t_1", "t_2"],
+                "extra_starts": 1,
+            }
+            store.write_json("pending.json", new_receipt)
+            self.assertFalse(store.has_pending_uncertainty())
+            for outcome in ("pending", "uncertain"):
+                store.write_json("pending.json", {**new_receipt, "outcome": outcome})
+                self.assertTrue(store.has_pending_uncertainty())
+            store.write_json("pending.json", {"outcome": "reconciled", "actual_task_id": "t_old"})
+            self.assertFalse(store.has_pending_uncertainty())
+
 
 class SupervisionTests(unittest.TestCase):
     def test_timeout_observes_without_killing_and_waits_for_finite_child(self) -> None:

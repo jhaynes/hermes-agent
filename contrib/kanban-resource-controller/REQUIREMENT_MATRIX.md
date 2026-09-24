@@ -9,13 +9,13 @@ All automated tests run serially. `PASS` below means implemented unit/contract c
 | T-003 recovery dwell/gaps/cooldown | PASS | `test_first_sample_holds_then_full_quiet_dwell_recovers`, `test_recovery_requires_strict_recovery_band_and_command_resets_it`, `test_completed_command_consumes_the_full_recovery_window` cover exact 120 seconds, gaps, restart/counter reset, and post-command cooldown |
 | T-004 unknown telemetry | PASS | policy and `test_host_lifecycle.HostSamplerTests` |
 | T-005 singleton/CLOEXEC | PASS | `test_lock_storage_supervision.SingletonLockTests` |
-| T-006 incompatible config/source | PASS | `test_config_cli.ConfigContractTests`, `test_live_cli_contract`, `test_preflight.PreflightTests`, `test_spec.RuntimeSpecTests` |
+| T-006 incompatible config/source | PASS | `test_spec.RuntimeSpecTests` covers strict admission parsing and sole absent-section defaults; `test_config_cli.ConfigContractTests` covers exact Hermes host/max-profile parity and explicit profile registry; `test_main.CheckOutputTests` makes expected/observed mismatch visible; existing source/live-CLI/preflight refusal remains |
 | T-007 one-task decomposition | PASS | CLI contract/adapter and engine decomposition tests plus `test_sandbox_cli_e2e` prove an explicit task, never `--all` |
-| T-008 dispatch/caps/--max1 | PASS (isolated) | `test_capacity_is_host_profile_and_board_admission_only`, engine limit holds, and sandboxed executable argv receipt prove host 2/profile 1/board `--max 1` without production dispatch |
-| T-009 one command/window | PASS | decomposition/dispatch/uncertainty tests and `test_completed_command_consumes_the_full_recovery_window` |
+| T-008 configurable caps/C′ `m` | PASS (isolated) | non-default host 4, builder 2, board override 4 boundaries; selected-board `hermes_db_running_count`; terminal-card divergence; `m` 1/2/3/4 and cap hold; sandbox executable ramps explicit `--max 1` then `--max 2` without production dispatch |
+| T-009 one mutating command/window | PASS | decomposition/dispatch/uncertainty tests, `test_completion_race_reconciles_all_identities_and_dual_writes_receipt`, and recovery-dwell test prove dry run plus exactly one real dispatch and no same-window second mutation |
 | T-010 downstream-first/aging | PASS | classification/selection/aging/priority-miss tests plus `test_aging_never_bypasses_estop_manual_hold_or_host_cap` |
-| T-011 pre-command races | PASS (isolated) | fingerprint race and final-fence capacity race both abort before side effect and do not count an aborted aging window |
-| T-012 post-command ambiguity | PASS (isolated) | divergent actual task logs `priority-miss`; timeout, launch/output failure, parse drift, or reconciliation ambiguity persist `uncertain-outcome` and do not retry |
+| T-011 pre-command races | PASS (isolated) | fingerprint/config/worker/DB-count drift aborts; multi-row dry run is `precommand-race`; unchanged fences pass the same independently computed `m` to dry and real commands |
+| T-012 post-command ambiguity | PASS (isolated) | exact ordered CLI/new `(task, run, worker identity)` set; multi-start success and priority first row; malformed/duplicate/too-many rows; manual/run drift; host and stricter-profile post-cap violations; persistent uncertainty; dual-written journal/status and fresh dwell |
 | T-013 exact process identity | PASS | `test_inventory.WorkerArgvTests` and `ReconciliationTests` |
 | T-014 timeout supervision/no signal | PASS | `test_timeout_observes_without_killing_and_waits_for_finite_child` |
 | T-015 ESTOP preservation | PASS | `test_estop_is_read_only_and_prevents_every_command`, manual-hold test |
@@ -43,6 +43,7 @@ All automated tests run serially. `PASS` below means implemented unit/contract c
 | ESTOP/manual hold/unowned subscription/cap | no prediction-side effect or dispatch/decompose | engine common-hold, aging, and capacity-limit tests |
 | Actual task differs from prediction | one command only, `priority_miss` increment, no retry/kill | `test_highest_stage_dispatches_once_and_logs_priority_miss` |
 | Command just consumed a window | no second command before a new full recovery interval | `test_completed_command_consumes_the_full_recovery_window` |
+| Completion race starts extras | exact identities/caps reconcile, additive receipt is written, dwell restarts; otherwise persistent uncertainty | `test_completion_race_reconciles_all_identities_and_dual_writes_receipt`, `test_stricter_profile_and_host_caps_are_verified_after_dispatch`, `test_post_difference_pairs_task_run_and_worker_identity` |
 | Stop with command/worker/unknown descendant | lifecycle refusal; no bootout promise | `test_stop_refuses_commands_workers_and_unknown_descendants` |
 
 ## Reproducible verification command
@@ -54,6 +55,28 @@ From `contrib/kanban-resource-controller` in the isolated worktree:
     /usr/bin/plutil -lint launchd/ai.hermes.kanban-resource-controller.plist
 
 The external package receipt records the exact frozen SHA/tree, archive SHA-256, per-file manifest, final count/output, and cumulative `git diff --check` receipt. Tests are serial at the file runner level; only finite child execution inside the timeout case provides controlled concurrency.
+
+## Configurable-cap mutation receipt
+
+Disposable copies were made from the implementation tree; each row records the disposable-tree SHA-256, the behavior test run, and its actual nonzero exit. No test reads source text. Full receipt: `/Users/jhaynes/.hermes/profiles/builder/cache/scratch/controller-cap-mutation-receipt.txt`.
+
+| Mutant | Killer | Exit | Disposable tree SHA-256 |
+|---|---|---:|---|
+| `_common_hold` host literal 2 | `test_nondefault_common_host_cap_uses_the_shared_caps_object` | 1 | `530b2ddec45d171a2dabaef73e300e8708f9470eb8b500f5d7813e49fa415a2d` |
+| inventory host literal 2 | `test_capacity_is_host_profile_and_board_admission_only` | 1 | `6012d46de77a356de157b3cc8e441a3f2b2fcffd5837a34f1d3c4ddca4523d2b` |
+| ignore profile override | same capacity boundary test | 1 | `a8a49403fabe873d6a0b5c73403946a1fb2cab209d1a52f3df9c3fea1c86d017` |
+| ignore board override | same capacity boundary test | 1 | `0f66a4f7547753fe64d58ff358595ad1dabea377a07b6e9056b5fbd5f5306698` |
+| hard-code dispatch `m = 1` | `test_dispatch_maximum_uses_selected_board_database_running_count` | 1 | `675f0183f68d9c80fb04019210f79f5b5851e30602aae3ad703c6c111c21f094` |
+| hard-code dispatch `m = board_cap` | same `m` boundary test | 1 | `58fad5ee371469fc959a6e74f149e2b89f919086f685fb3ad73a159d7a171311` |
+| use reconciled live runs for `m` | runtime count-divergence test | 1 | `3a8f8517ad448f31b17c25686974813666ba2cb8738e5a096a39f0549ebded55` |
+| count all task rows for `m` | board DB-running predicate test | 1 | `d934e5c1519119d18674a71323b16d0deee9f8d42154df5afd9a7207981a58cf` |
+| accept multi-row dry run | exact-one prediction test | 1 | `f5782feb2881b15fafce749a9bc7e4b06c0838550652968e7c52f5bc4ade18b1` |
+| weaken new-worker set equality | task/run/worker difference test | 1 | `625997e17f1a2d26880698c49cf2d7757ee9c5c67093b307614f89b1b314cdd9` |
+| omit run id from identity | same difference test | 1 | `ca74b87e4e24ce28fb1b09dcce39bc36a54103cce7692a86cf1689ce3e6a3168` |
+| skip profile post-recount | stricter-profile/host race test | 1 | `d4c3b4217536696e26be09fae1731c1f95fac6e4d6019072fdfb2283b7381a07` |
+| skip `command_consumed` | multi-start receipt/dwell test | 1 | `69686f01731d16792eb34be9414093be848fe3dd912d894f98de7b8e785d3ba5` |
+| weaken exact Hermes cap equality | config mismatch table | 1 | `02d78f7ba2c8bdc05c9cc799f01ed479475eb85a7f1313cd832cee0fcac290a1` |
+| change absent host/profile/board default | absent-section migration test (three independent copies) | 1 each | `97d141ca6c10977cf13d375d63740aa2d97c6a4715385f4e071bfae1c9cb028a`, `c22498d23b67507555a5391b1f8c7c0e16e8846a75be0edc42f1928b8433bae5`, `800fe169cf6af03a282818cc48170d7d762cf8f2a1e1dc2c11963e0a1d88b5fe` |
 
 ## Open activation/release requirements
 

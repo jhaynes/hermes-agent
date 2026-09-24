@@ -11,6 +11,7 @@ from .config import ControllerConfig
 from .engine import BoardView, GateSnapshot
 from .inventory import ProcessSnapshot, reconcile_workers
 from .policy import HostSample
+from .spec import AdmissionCaps
 from .worker_identity import current_instantiation_epoch
 
 
@@ -21,6 +22,7 @@ class RuntimeWorld:
         self,
         *,
         boards: Mapping[str, Path],
+        admission_caps: AdmissionCaps,
         sampler: Callable[[], HostSample],
         config_reader: Callable[[], Mapping[str, object]],
         process_reader: Callable[[], Sequence[ProcessSnapshot]],
@@ -31,6 +33,7 @@ class RuntimeWorld:
         if not boards:
             raise ValueError("at least one board is required")
         self._boards = dict(boards)
+        self._admission_caps = admission_caps
         self._sampler = sampler
         self._config_reader = config_reader
         self._process_reader = process_reader
@@ -39,7 +42,9 @@ class RuntimeWorld:
         self._max_rows = max_rows
 
     def capture(self) -> GateSnapshot:
-        config = ControllerConfig.from_mapping(self._config_reader())
+        config = ControllerConfig.from_mapping(
+            self._config_reader(), admission_caps=self._admission_caps,
+        )
         sample = self._sampler()
         snapshots = [
             read_board_inventory(self._boards[slug], board=slug, max_rows=self._max_rows)
@@ -57,6 +62,8 @@ class RuntimeWorld:
                     (task_id for task_id, status in snapshot.statuses.items() if status == "triage"),
                     None,
                 ),
+                snapshot.hermes_db_running_count,
+                config.dispatch_profiles,
             )
             for snapshot in snapshots
         )
@@ -107,6 +114,7 @@ def _fingerprint(config, estop, manual, boards, workers) -> str:
                 "assignees": dict(board.assignees),
                 "statuses": dict(board.statuses),
                 "runs": [asdict(run) for run in board.runs],
+                "hermes_db_running_count": board.hermes_db_running_count,
                 "unowned": board.unowned_subscriptions,
             }
             for board in boards

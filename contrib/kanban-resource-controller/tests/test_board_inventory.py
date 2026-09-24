@@ -57,8 +57,18 @@ class BoardInventoryTests(unittest.TestCase):
             self.assertEqual(snapshot.titles, {"t_ready": "Review changes"})
             self.assertEqual(snapshot.assignees, {"t_ready": "reviewscope"})
             self.assertEqual(snapshot.runs[0].task_status, "done")
+            self.assertEqual(snapshot.hermes_db_running_count, 0)
             self.assertEqual(snapshot.runs[0].worker_fingerprint.raw, FINGERPRINT)
             self.assertEqual(snapshot.unowned_subscriptions, 0)
+
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE tasks SET status='running' WHERE id='t_live'")
+            connection.commit()
+            connection.close()
+            self.assertEqual(
+                read_board_inventory(path, board="alpha", max_rows=10).hermes_db_running_count,
+                1,
+            )
 
     def test_unowned_subscription_and_schema_or_row_drift_hold(self) -> None:
         with tempfile.TemporaryDirectory() as root:

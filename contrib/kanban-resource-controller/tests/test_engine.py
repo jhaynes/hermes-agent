@@ -6,6 +6,7 @@ import tempfile
 import unittest
 
 from resource_controller.config import ControllerConfig
+from resource_controller.cli_contract import PrecommandRace
 from resource_controller.engine import (
     BoardView,
     CommandOutcome,
@@ -16,23 +17,30 @@ from resource_controller.inventory import LiveWorker
 from resource_controller.policy import AdmissionPolicy, HostSample
 from resource_controller.priority import PredictedPick
 from resource_controller.storage import SecureStateStore
+from resource_controller.spec import AdmissionCaps
 
 GIB = 1024**3
+DEFAULT_CAPS = AdmissionCaps(2, 1, (), 1, ())
 
 
-def config(auto_decompose: bool = False) -> ControllerConfig:
+def config(
+    auto_decompose: bool = False,
+    caps: AdmissionCaps = DEFAULT_CAPS,
+) -> ControllerConfig:
     return ControllerConfig.from_mapping({
         "dispatch_in_gateway": False,
-        "max_in_progress": 2,
-        "max_in_progress_per_profile": 1,
+        "max_in_progress": caps.host_cap,
+        "max_in_progress_per_profile": caps.maximum_profile_cap,
         "failure_limit": 2,
         "auto_decompose": auto_decompose,
         "reconcile_orphans": True,
         "dispatch_stale_timeout_seconds": 0,
         "review_dispatch": True,
         "default_assignee": None,
-        "dispatch_profiles": None,
-    })
+        "dispatch_profiles": [
+            "builder", "reviewquality", "reviewscope", "reviewer", "default", "p1", "p2", "p3", "p4",
+        ],
+    }, admission_caps=caps)
 
 
 def host(now: float) -> HostSample:
@@ -49,11 +57,12 @@ def snapshot(
     auto_decompose: bool = False,
     workers: tuple[LiveWorker, ...] = (),
     unowned_subscriptions: int = 0,
+    caps: AdmissionCaps = DEFAULT_CAPS,
 ) -> GateSnapshot:
     return GateSnapshot(
         fingerprint=fingerprint,
         sample=host(now),
-        config=config(auto_decompose),
+        config=config(auto_decompose, caps),
         estop=estop,
         manual_hold=manual_hold,
         workers=workers,
@@ -77,15 +86,18 @@ class FakeCommands:
     def __init__(self) -> None:
         self.predictions: dict[str, PredictedPick | Exception] = {}
         self.calls: list[tuple[str, str, str]] = []
-        self.outcome = CommandOutcome(False, "t_actual")
+        self.outcome = CommandOutcome(False)
+        self.dispatch_maxes: list[int] = []
 
-    def predict(self, board: BoardView, failure_limit: int) -> PredictedPick:
+    def predict(self, board: BoardView, failure_limit: int, dispatch_max: int) -> PredictedPick:
+        self.dispatch_maxes.append(dispatch_max)
         value = self.predictions[board.board]
         if isinstance(value, Exception):
             raise value
         return value
 
-    def dispatch(self, pick: PredictedPick, failure_limit: int) -> CommandOutcome:
+    def dispatch(self, pick: PredictedPick, failure_limit: int, dispatch_max: int) -> CommandOutcome:
+        self.dispatch_maxes.append(dispatch_max)
         self.calls.append(("dispatch", pick.board, pick.task_id))
         return self.outcome
 
@@ -110,12 +122,27 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(commands.calls, [])
             self.assertEqual(world.states[0].estop, b'{"reason":"manual"}')
 
+    def test_nondefault_common_host_cap_uses_the_shared_caps_object(self) -> None:
+        caps = AdmissionCaps(4, 2, (), 4, ())
+        board = BoardView("a", {}, {}, None)
+        workers = tuple(
+            LiveWorker(f"b{index}", f"t_{index}", index, index, float(index), f"p{index}", "running")
+            for index in range(4)
+        )
+        with tempfile.TemporaryDirectory() as root:
+            engine = self.make_engine(root, FakeWorld([]), FakeCommands())
+            self.assertIsNone(engine._common_hold(snapshot(120, boards=(board,), workers=workers[:3], caps=caps)))
+            self.assertEqual(
+                engine._common_hold(snapshot(120, boards=(board,), workers=workers, caps=caps)),
+                "host-cap",
+            )
+
     def test_decomposition_consumes_window_without_dispatch(self) -> None:
         board = BoardView("a", {"t_triage": "Specify"}, {"t_triage": "specifier"}, "t_triage")
         with tempfile.TemporaryDirectory() as root:
             world = FakeWorld([snapshot(120, boards=(board,), auto_decompose=True), snapshot(121, boards=(board,), auto_decompose=True)])
             commands = FakeCommands()
-            commands.outcome = CommandOutcome(False, "t_triage")
+            commands.outcome = CommandOutcome(False, ("t_triage",))
             result = self.make_engine(root, world, commands).tick()
             self.assertEqual(result.reason, "decomposed")
             self.assertEqual(commands.calls, [("decompose", "a", "t_triage")])
@@ -123,16 +150,26 @@ class EngineTests(unittest.TestCase):
     def test_highest_stage_dispatches_once_and_logs_priority_miss(self) -> None:
         boards = (
             BoardView("build", {"t_b": "Build"}, {"t_b": "builder"}, None),
-            BoardView("review", {"t_r": "Review"}, {"t_r": "reviewquality"}, None),
+            BoardView(
+                "review",
+                {"t_r": "Review", "t_other": "Other review"},
+                {"t_r": "reviewquality", "t_other": "reviewquality"},
+                None,
+            ),
         )
         with tempfile.TemporaryDirectory() as root:
-            world = FakeWorld([snapshot(120, boards=boards), snapshot(121, boards=boards)])
+            actual = LiveWorker("review", "t_other", 9, 42, 1.0, "reviewquality", "running")
+            world = FakeWorld([
+                snapshot(120, boards=boards),
+                snapshot(121, boards=boards),
+                snapshot(122, boards=boards, workers=(actual,)),
+            ])
             commands = FakeCommands()
             commands.predictions = {
                 "build": PredictedPick("build", "t_b", "builder", "Build"),
                 "review": PredictedPick("review", "t_r", "reviewquality", "Review"),
             }
-            commands.outcome = CommandOutcome(False, "t_other")
+            commands.outcome = CommandOutcome(False, ("t_other",), (("t_other", "reviewquality"),))
             engine = self.make_engine(root, world, commands)
             result = engine.tick()
             self.assertEqual(commands.calls, [("dispatch", "review", "t_r")])
@@ -150,6 +187,15 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(result.reason, "precommand-race")
             self.assertEqual(commands.calls, [])
             self.assertEqual(engine.passed, {}, "aborted windows must not count as passed admissions")
+
+    def test_multirow_dry_run_is_precommand_race_without_mutating_dispatch(self) -> None:
+        board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
+        with tempfile.TemporaryDirectory() as root:
+            commands = FakeCommands()
+            commands.predictions = {"a": PrecommandRace("more than one row")}
+            engine = self.make_engine(root, FakeWorld([snapshot(120, boards=(board,))]), commands)
+            self.assertEqual(engine.tick().reason, "precommand-race")
+            self.assertEqual(commands.calls, [])
 
     def test_aging_never_bypasses_estop_manual_hold_or_host_cap(self) -> None:
         board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
@@ -216,19 +262,125 @@ class EngineTests(unittest.TestCase):
 
     def test_completed_command_consumes_the_full_recovery_window(self) -> None:
         board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
+        actual = LiveWorker("a", "t_1", 7, 42, 1.0, "builder", "running")
         with tempfile.TemporaryDirectory() as root:
             world = FakeWorld([
                 snapshot(120, boards=(board,)),
                 snapshot(121, boards=(board,)),
-                snapshot(150, boards=(board,)),
+                snapshot(122, boards=(board,), workers=(actual,)),
+                snapshot(150, boards=(board,), workers=(actual,)),
             ])
             commands = FakeCommands()
             commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
-            commands.outcome = CommandOutcome(False, "t_1")
+            commands.outcome = CommandOutcome(False, ("t_1",), (("t_1", "builder"),))
             engine = self.make_engine(root, world, commands)
             self.assertEqual(engine.tick().reason, "dispatched")
             self.assertEqual(engine.tick().reason, "recovery-dwell")
             self.assertEqual(commands.calls, [("dispatch", "a", "t_1")])
+
+    def test_completion_race_reconciles_all_identities_and_dual_writes_receipt(self) -> None:
+        caps = AdmissionCaps(4, 1, (("builder", 2),), 1, (("a", 4),))
+        board = BoardView(
+            "a",
+            {"t_1": "Build one", "t_2": "Build two"},
+            {"t_1": "builder", "t_2": "builder"},
+            None,
+            1,
+        )
+        first = LiveWorker("a", "t_1", 11, 101, 1.0, "builder", "running")
+        second = LiveWorker("a", "t_2", 12, 102, 2.0, "builder", "running")
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(board,), caps=caps),
+                snapshot(121, boards=(board,), caps=caps),
+                snapshot(122, boards=(board,), workers=(first, second), caps=caps),
+                snapshot(150, boards=(board,), workers=(first, second), caps=caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build one")}
+            commands.outcome = CommandOutcome(
+                False,
+                ("t_1", "t_2"),
+                (("t_1", "builder"), ("t_2", "builder")),
+            )
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "dispatched")
+            self.assertEqual(commands.calls, [("dispatch", "a", "t_1")])
+            self.assertEqual(commands.dispatch_maxes, [2, 2])
+            journal = engine.store.read_json("pending.json")
+            self.assertEqual(journal["actual_task_id"], "t_1")
+            self.assertEqual(journal["actual_task_ids"], ["t_1", "t_2"])
+            self.assertEqual(journal["extra_starts"], 1)
+            status = engine.store.read_json("status.json")
+            self.assertEqual(status["actual_task_ids"], ["t_1", "t_2"])
+            self.assertEqual(status["extra_starts"], 1)
+            self.assertEqual(engine.tick().reason, "recovery-dwell")
+            self.assertEqual(commands.calls, [("dispatch", "a", "t_1")])
+
+    def test_stricter_profile_and_host_caps_are_verified_after_dispatch(self) -> None:
+        profile_caps = AdmissionCaps(4, 1, (("builder", 2),), 4, ())
+        board = BoardView(
+            "a",
+            {"t_1": "Review one", "t_2": "Review two"},
+            {"t_1": "reviewer", "t_2": "reviewer"},
+            None,
+            1,
+        )
+        starts = (
+            LiveWorker("a", "t_1", 11, 101, 1.0, "reviewer", "running"),
+            LiveWorker("a", "t_2", 12, 102, 2.0, "reviewer", "running"),
+        )
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(board,), caps=profile_caps),
+                snapshot(121, boards=(board,), caps=profile_caps),
+                snapshot(122, boards=(board,), workers=starts, caps=profile_caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "reviewer", "Review one")}
+            commands.outcome = CommandOutcome(False, ("t_1", "t_2"), (("t_1", "reviewer"), ("t_2", "reviewer")))
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "uncertain-outcome")
+            self.assertEqual(engine.store.read_json("status.json")["cap_violation"]["name"], "reviewer")
+            self.assertTrue(engine.store.has_pending_uncertainty())
+
+        host_caps = AdmissionCaps(4, 4, (), 4, ())
+        baseline = tuple(
+            LiveWorker(f"b{i}", f"t_old{i}", i, i, float(i), f"p{i}", "done")
+            for i in range(3)
+        )
+        post = baseline + starts
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(board,), workers=baseline, caps=host_caps),
+                snapshot(121, boards=(board,), workers=baseline, caps=host_caps),
+                snapshot(122, boards=(board,), workers=post, caps=host_caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "reviewer", "Review one")}
+            commands.outcome = CommandOutcome(False, ("t_1", "t_2"), (("t_1", "reviewer"), ("t_2", "reviewer")))
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "uncertain-outcome")
+            violation = engine.store.read_json("status.json")["cap_violation"]
+            self.assertEqual((violation["reason"], violation["count"], violation["cap"]), ("host-cap", 5, 4))
+
+    def test_post_difference_pairs_task_run_and_worker_identity(self) -> None:
+        caps = AdmissionCaps(4, 2, (), 4, ())
+        board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
+        before = LiveWorker("other", "t_manual", 1, 90, 9.0, "reviewer", "running", "epoch|90")
+        changed_run = LiveWorker("other", "t_manual", 2, 90, 9.0, "reviewer", "running", "epoch|90")
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(board,), workers=(before,), caps=caps),
+                snapshot(121, boards=(board,), workers=(before,), caps=caps),
+                snapshot(122, boards=(board,), workers=(changed_run,), caps=caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
+            commands.outcome = CommandOutcome(False)
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "uncertain-outcome")
+            self.assertTrue(engine.store.has_pending_uncertainty())
 
     def test_no_eligible_prediction_advances_round_robin_pointer(self) -> None:
         boards = (
@@ -249,7 +401,7 @@ class EngineTests(unittest.TestCase):
             states = [snapshot(120, boards=(board,)), snapshot(121, boards=(board,))]
             commands = FakeCommands()
             commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
-            commands.outcome = CommandOutcome(True, None)
+            commands.outcome = CommandOutcome(True)
             first = self.make_engine(root, FakeWorld(states), commands).tick()
             self.assertEqual(first.reason, "uncertain-outcome")
 

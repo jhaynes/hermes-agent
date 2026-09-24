@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Mapping
 
+from .spec import AdmissionCaps
+
 
 class ConfigCompatibilityError(ValueError):
     pass
@@ -43,10 +45,18 @@ class ControllerConfig:
     auto_decompose: bool
     review_dispatch: bool
     default_assignee: str | None
-    dispatch_profiles: tuple[str, ...] | None
+    dispatch_profiles: tuple[str, ...]
+    admission_caps: AdmissionCaps
+    hermes_host_cap: int
+    hermes_profile_cap: int
 
     @classmethod
-    def from_mapping(cls, raw: Mapping[str, Any]) -> "ControllerConfig":
+    def from_mapping(
+        cls,
+        raw: Mapping[str, Any],
+        *,
+        admission_caps: AdmissionCaps,
+    ) -> "ControllerConfig":
         missing = _REQUIRED_KEYS - set(raw)
         unknown = set(raw) - _REQUIRED_KEYS - _ALLOWED_IGNORED_KEYS
         if missing:
@@ -54,8 +64,12 @@ class ControllerConfig:
         if unknown:
             raise ConfigCompatibilityError(f"unsupported kanban setting: {sorted(unknown)[0]}")
         _exact_bool(raw, "dispatch_in_gateway", False)
-        _exact_int(raw, "max_in_progress", 2)
-        _exact_int(raw, "max_in_progress_per_profile", 1)
+        _exact_int(raw, "max_in_progress", admission_caps.host_cap)
+        _exact_int(
+            raw,
+            "max_in_progress_per_profile",
+            admission_caps.maximum_profile_cap,
+        )
         failure_limit = raw["failure_limit"]
         if not _is_int(failure_limit) or failure_limit <= 0:
             raise ConfigCompatibilityError("failure_limit must be a positive integer")
@@ -67,17 +81,28 @@ class ControllerConfig:
         if default_assignee is not None and not isinstance(default_assignee, str):
             raise ConfigCompatibilityError("default_assignee must be a string or null")
         profiles = raw["dispatch_profiles"]
-        if profiles is not None and (
+        if (
             not isinstance(profiles, list)
-            or any(not isinstance(item, str) or not item for item in profiles)
+            or not profiles
+            or any(not isinstance(item, str) or not item.strip() for item in profiles)
         ):
-            raise ConfigCompatibilityError("dispatch_profiles must be a string list or null")
+            raise ConfigCompatibilityError("dispatch_profiles must be a nonempty string list")
+        if len(set(profiles)) != len(profiles):
+            raise ConfigCompatibilityError("dispatch_profiles must not contain duplicates")
+        unknown_profiles = set(dict(admission_caps.profile_overrides)) - set(profiles)
+        if unknown_profiles:
+            raise ConfigCompatibilityError(
+                f"dispatch_profiles missing override profile: {sorted(unknown_profiles)[0]}"
+            )
         return cls(
             failure_limit=failure_limit,
             auto_decompose=auto_decompose,
             review_dispatch=review_dispatch,
             default_assignee=default_assignee,
-            dispatch_profiles=None if profiles is None else tuple(profiles),
+            dispatch_profiles=tuple(profiles),
+            admission_caps=admission_caps,
+            hermes_host_cap=raw["max_in_progress"],
+            hermes_profile_cap=raw["max_in_progress_per_profile"],
         )
 
 

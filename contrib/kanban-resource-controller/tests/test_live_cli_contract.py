@@ -121,20 +121,20 @@ class LiveDispatchAdapterTests(unittest.TestCase):
 
     def test_live_shape_dispatch_is_certain(self) -> None:
         outcome = self._adapter(json.dumps(LIVE_PAYLOAD)).dispatch(
-            PredictedPick("default", "t_1", "builder", "Build"), 2)
+            PredictedPick("default", "t_1", "builder", "Build"), 2, 1)
         self.assertFalse(outcome.uncertain)
         self.assertEqual(outcome.actual_task_id, "t_1")
 
     def test_legacy_shape_dispatch_is_uncertain(self) -> None:
         legacy = {k: v for k, v in LIVE_PAYLOAD.items() if k != "memory_pressure"}
         outcome = self._adapter(json.dumps(legacy)).dispatch(
-            PredictedPick("default", "t_1", "builder", "Build"), 2)
+            PredictedPick("default", "t_1", "builder", "Build"), 2, 1)
         self.assertTrue(outcome.uncertain)
 
     def test_lock_skipped_dispatch_is_uncertain(self) -> None:
         # Another dispatcher owned the board tick: dual authority, never a clean miss.
         outcome = self._adapter(_with(skipped_locked=True, spawned=[]), actual=None).dispatch(
-            PredictedPick("default", "t_1", "builder", "Build"), 2)
+            PredictedPick("default", "t_1", "builder", "Build"), 2, 1)
         self.assertTrue(outcome.uncertain)
 
 

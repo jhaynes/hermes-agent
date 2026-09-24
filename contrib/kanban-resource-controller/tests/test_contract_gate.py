@@ -23,6 +23,7 @@ import unittest
 
 from resource_controller.inventory import ProcessSnapshot
 from resource_controller.runtime import RuntimeWorld
+from resource_controller.spec import AdmissionCaps
 from resource_controller.policy import HostSample
 
 GIB = 1024**3
@@ -166,13 +167,14 @@ class ContractGateTests(unittest.TestCase):
 
                 world = RuntimeWorld(
                     boards={"gate": db},
+                    admission_caps=AdmissionCaps(2, 1, (), 1, ()),
                     sampler=lambda: HostSample(1, 1, 10, 6 * GIB, "normal", 1, 1),
                     config_reader=lambda: {
                         "dispatch_in_gateway": False, "max_in_progress": 2,
                         "max_in_progress_per_profile": 1, "failure_limit": 2,
                         "auto_decompose": True, "reconcile_orphans": True,
                         "dispatch_stale_timeout_seconds": 0, "review_dispatch": True,
-                        "default_assignee": None, "dispatch_profiles": None,
+                        "default_assignee": None, "dispatch_profiles": ["reviewquality"],
                     },
                     process_reader=scoped_process_reader,
                     estop_paths=(),

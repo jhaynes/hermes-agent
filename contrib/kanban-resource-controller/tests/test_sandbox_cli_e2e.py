@@ -29,10 +29,12 @@ class SandboxedCliTests(unittest.TestCase):
                     log = pathlib.Path({str(log_path)!r})
                     with log.open("a", encoding="utf-8") as handle:
                         handle.write(json.dumps(sys.argv[1:]) + "\\n")
+                    maximum = sys.argv[sys.argv.index("--max") + 1] if "--max" in sys.argv else "1"
+                    task_id = "t_1" if maximum == "1" else "t_2"
                     dispatch = {{
                         "reclaimed": 0, "crashed": [], "timed_out": [], "stale": [],
                         "auto_blocked": [], "promoted": 0,
-                        "spawned": [{{"task_id": "t_pred", "assignee": "reviewquality", "workspace": "scratch"}}],
+                        "spawned": [{{"task_id": task_id, "assignee": "reviewquality", "workspace": "scratch"}}],
                         "skipped_unassigned": [], "skipped_nonspawnable": [],
                         "skipped_per_profile_capped": [], "auto_assigned_default": [],
                         "reaped_terminal_workers": [], "respawn_guarded": [], "rate_limited": [],
@@ -54,10 +56,16 @@ class SandboxedCliTests(unittest.TestCase):
                 return None if task_id == "t_triage" else task_id
 
             commands = CliCommands(executable, reconcile_actual=reconcile)
-            board = BoardView("sandbox", {"t_pred": "Review"}, {"t_pred": "reviewquality"}, None)
-            prediction = commands.predict(board, failure_limit=2)
-            self.assertEqual(prediction, PredictedPick("sandbox", "t_pred", "reviewquality", "Review"))
-            self.assertEqual(commands.dispatch(prediction, failure_limit=2).actual_task_id, "t_pred")
+            board = BoardView(
+                "sandbox", {"t_1": "Review one", "t_2": "Review two"},
+                {"t_1": "reviewquality", "t_2": "reviewquality"}, None,
+            )
+            prediction = commands.predict(board, failure_limit=2, dispatch_max=1)
+            self.assertEqual(prediction, PredictedPick("sandbox", "t_1", "reviewquality", "Review one"))
+            self.assertEqual(commands.dispatch(prediction, failure_limit=2, dispatch_max=1).actual_task_id, "t_1")
+            second = commands.predict(board, failure_limit=2, dispatch_max=2)
+            self.assertEqual(second.task_id, "t_2")
+            self.assertEqual(commands.dispatch(second, failure_limit=2, dispatch_max=2).actual_task_id, "t_2")
             self.assertEqual(commands.decompose("sandbox", "t_triage").actual_task_id, "t_triage")
 
             calls = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
@@ -66,6 +74,8 @@ class SandboxedCliTests(unittest.TestCase):
                 [
                     ["kanban", "--board", "sandbox", "dispatch", "--dry-run", "--max", "1", "--failure-limit", "2", "--json"],
                     ["kanban", "--board", "sandbox", "dispatch", "--max", "1", "--failure-limit", "2", "--json"],
+                    ["kanban", "--board", "sandbox", "dispatch", "--dry-run", "--max", "2", "--failure-limit", "2", "--json"],
+                    ["kanban", "--board", "sandbox", "dispatch", "--max", "2", "--failure-limit", "2", "--json"],
                     ["kanban", "--board", "sandbox", "decompose", "t_triage", "--author", "auto-decomposer", "--json"],
                 ],
             )

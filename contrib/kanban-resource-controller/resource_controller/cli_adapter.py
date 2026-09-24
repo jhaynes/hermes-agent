@@ -42,29 +42,35 @@ class CliCommands:
         self.runner = runner
         self.reconcile_actual = reconcile_actual
 
-    def predict(self, board: BoardView, failure_limit: int) -> PredictedPick:
+    def predict(self, board: BoardView, failure_limit: int, dispatch_max: int) -> PredictedPick:
         result = self.runner(
-            build_dry_run_command(self.executable, board.board, failure_limit),
+            build_dry_run_command(self.executable, board.board, failure_limit, dispatch_max),
             15.0,
             65536,
         )
         if result.uncertain:
             raise CommandContractError("dry-run outcome uncertain")
-        return parse_dispatch_prediction(result.stdout, board=board.board, titles=board.titles)
+        return parse_dispatch_prediction(
+            result.stdout,
+            board=board.board,
+            titles=board.titles,
+            assignees=board.assignees,
+            eligible_profiles=board.eligible_profiles or None,
+        )
 
-    def dispatch(self, pick: PredictedPick, failure_limit: int) -> CommandOutcome:
+    def dispatch(self, pick: PredictedPick, failure_limit: int, dispatch_max: int) -> CommandOutcome:
         result = self.runner(
-            build_dispatch_command(self.executable, pick.board, failure_limit),
+            build_dispatch_command(self.executable, pick.board, failure_limit, dispatch_max),
             30.0,
             65536,
         )
-        if result.uncertain or not _valid_dispatch_json(result.stdout):
-            return CommandOutcome(True, None)
         try:
-            actual = self.reconcile_actual(pick.board, pick.task_id)
-        except Exception:
-            return CommandOutcome(True, None)
-        return CommandOutcome(False, actual)
+            claims = _dispatch_claims(result.stdout, dispatch_max)
+        except (CommandContractError, TypeError, ValueError):
+            return CommandOutcome(True)
+        if result.uncertain:
+            return CommandOutcome(True)
+        return CommandOutcome(False, tuple(task_id for task_id, _ in claims), claims)
 
     def decompose(self, board: str, task_id: str) -> CommandOutcome:
         result = self.runner(
@@ -73,33 +79,44 @@ class CliCommands:
             65536,
         )
         if result.uncertain:
-            return CommandOutcome(True, None)
+            return CommandOutcome(True)
         try:
             payload = json.loads(result.stdout)
         except json.JSONDecodeError:
-            return CommandOutcome(True, None)
+            return CommandOutcome(True)
         if (
             not isinstance(payload, dict)
             or set(payload) != _DECOMPOSE_KEYS
             or payload.get("task_id") != task_id
             or payload.get("ok") is not True
         ):
-            return CommandOutcome(True, None)
+            return CommandOutcome(True)
         try:
             unexpected_worker = self.reconcile_actual(board, task_id)
         except Exception:
-            return CommandOutcome(True, None)
+            return CommandOutcome(True)
         if unexpected_worker is not None:
-            return CommandOutcome(True, None)
-        return CommandOutcome(False, task_id)
+            return CommandOutcome(True)
+        return CommandOutcome(False, (task_id,))
 
 
-def _valid_dispatch_json(output: str) -> bool:
-    try:
-        payload = validate_dispatch_payload(output)
-    except CommandContractError:
-        return False
+def _dispatch_claims(output: str, dispatch_max: int) -> tuple[tuple[str, str], ...]:
+    payload = validate_dispatch_payload(output)
     if payload["skipped_locked"]:
         # A second dispatcher owned the tick: dual authority, never a clean miss.
-        return False
-    return len(payload["spawned"]) <= 1
+        raise CommandContractError("another dispatcher holds the board tick lock")
+    rows = payload["spawned"]
+    if len(rows) > dispatch_max:
+        raise CommandContractError("dispatch reported more starts than its maximum")
+    claims: list[tuple[str, str]] = []
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"task_id", "assignee", "workspace"}:
+            raise CommandContractError("spawned row shape mismatch")
+        task_id = row["task_id"]
+        assignee = row["assignee"]
+        if not isinstance(task_id, str) or not task_id or not isinstance(assignee, str) or not assignee:
+            raise CommandContractError("spawned row identity is invalid")
+        claims.append((task_id, assignee))
+    if len({task_id for task_id, _ in claims}) != len(claims):
+        raise CommandContractError("duplicate spawned task identity")
+    return tuple(claims)

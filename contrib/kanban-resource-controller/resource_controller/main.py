@@ -9,6 +9,7 @@ import time
 from typing import Sequence
 
 from .cli_adapter import CliCommands
+from .config import ConfigCompatibilityError
 from .engine import ControllerEngine
 from .host import HostSampler
 from .locking import LockContended, SingletonLock
@@ -18,6 +19,7 @@ from .processes import scan_worker_processes
 from .runtime import RuntimeWorld
 from .spec import RuntimeSpec
 from .storage import SecureStateStore
+from .inventory import existing_capacity_violation
 from .telemetry import TelemetryError, select_backend
 from .telemetry import constants as telemetry_constants
 
@@ -62,6 +64,7 @@ def _world(spec: RuntimeSpec, store: SecureStateStore) -> RuntimeWorld:
 
     return RuntimeWorld(
         boards=spec.boards,
+        admission_caps=spec.admission_caps,
         sampler=sampler.sample,
         config_reader=config_reader,
         process_reader=scan_worker_processes,
@@ -82,15 +85,65 @@ def _commands(spec: RuntimeSpec, world: RuntimeWorld) -> CliCommands:
 
 
 def _check(spec: RuntimeSpec, store: SecureStateStore) -> int:
-    snapshot = _world(spec, store).capture()
+    try:
+        snapshot = _world(spec, store).capture()
+    except ConfigCompatibilityError as exc:
+        raw = read_kanban_config(spec.hermes_home / "config.yaml")
+        print(json.dumps({
+            "schema_version": telemetry_constants.SCHEMA_VERSION,
+            "mode": "observation-only",
+            "compatible": False,
+            "error": str(exc),
+            "expected_hermes": {
+                "kanban.max_in_progress": spec.admission_caps.host_cap,
+                "kanban.max_in_progress_per_profile": spec.admission_caps.maximum_profile_cap,
+            },
+            "observed_hermes": {
+                "kanban.max_in_progress": raw.get("max_in_progress"),
+                "kanban.max_in_progress_per_profile": raw.get("max_in_progress_per_profile"),
+            },
+        }, sort_keys=True))
+        return 1
+    violation = existing_capacity_violation(snapshot.workers, snapshot.config.admission_caps)
     print(json.dumps({
         "schema_version": telemetry_constants.SCHEMA_VERSION,
         "mode": "observation-only",
         "fingerprint": snapshot.fingerprint,
+        "compatible": True,
         "estop": snapshot.estop is not None,
         "manual_hold": snapshot.manual_hold,
-        "workers": len(snapshot.workers),
-        "boards": [board.board for board in snapshot.boards],
+        "controller_reconciled_live_count": len(snapshot.workers),
+        "boards": {
+            board.board: {
+                "hermes_db_running_count": board.hermes_db_running_count,
+                "controller_reconciled_live_count": sum(
+                    worker.board == board.board for worker in snapshot.workers
+                ),
+                "effective_cap": snapshot.config.admission_caps.for_board(board.board),
+            }
+            for board in snapshot.boards
+        },
+        "admission": {
+            "host_cap": snapshot.config.admission_caps.host_cap,
+            "profile_cap": snapshot.config.admission_caps.profile_cap,
+            "profile_overrides": dict(snapshot.config.admission_caps.profile_overrides),
+            "board_cap": snapshot.config.admission_caps.board_cap,
+            "board_overrides": dict(snapshot.config.admission_caps.board_overrides),
+            "expected_hermes": {
+                "kanban.max_in_progress": snapshot.config.admission_caps.host_cap,
+                "kanban.max_in_progress_per_profile": snapshot.config.admission_caps.maximum_profile_cap,
+            },
+            "observed_hermes": {
+                "kanban.max_in_progress": snapshot.config.hermes_host_cap,
+                "kanban.max_in_progress_per_profile": snapshot.config.hermes_profile_cap,
+            },
+            "cap_violation": None if violation is None else {
+                "reason": violation.reason,
+                "name": violation.name,
+                "count": violation.count,
+                "cap": violation.cap,
+            },
+        },
         "unowned_subscriptions": snapshot.unowned_subscriptions,
         "identity": {
             "contract": "composite-only worker_started_at f'{epoch}|{start}', exact string match",

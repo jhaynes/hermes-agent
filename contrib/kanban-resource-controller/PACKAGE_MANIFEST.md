@@ -27,7 +27,7 @@ The archive is a review artifact only. Its existence is not installation or acti
 
 All cumulative changes from the original base are confined to `contrib/kanban-resource-controller/`. No installed Hermes source, runtime configuration, service, production board, ESTOP, or package is included or modified by the artifact.
 
-The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74a202575ca2e2924e8` (tree `f94c7def18de02b772dab29dd487482074a8581c`). The packaging snapshot adds/updates only operational documentation and package metadata; the external receipt records its final SHA, tree, cumulative diff stat, and exact file list.
+The configurable-cap implementation base is the installed controller `7771e842390d627baa99e1ceee026f2ef20512cd` (tree `101b2e94814eafda322c84e19e874cf7aa36546f`). The external receipt records the final SHA, tree, package-only cumulative diff, and exact file list.
 
 ## Complete packaged file inventory
 
@@ -111,6 +111,14 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 | Immutable package and reproducible evidence | this manifest plus external release receipt/archive hash generated from and tested at the frozen commit |
 | Cross-platform memory telemetry (REQUIREMENT_LEDGER §17) | `resource_controller/telemetry/` package, `host.py`/`policy.py`/`spec.py`/`main.py`/`engine.py` updates, `tests/test_telemetry.py`, real Darwin/Linux fixtures |
 | Worker start-fingerprint identity (REQUIREMENT_LEDGER §18) | `resource_controller/worker_identity.py`, `board_inventory.py`/`inventory.py`/`processes.py`/`runtime.py`/`main.py` updates, `tests/test_worker_identity.py`, mandatory `scripts/contract_gate.py` + `tests/test_contract_gate.py` against pinned Hermes |
+| Configurable admission caps and C′ dispatch (REQUIREMENT_LEDGER §19) | `spec.py` sole 2/1/1 defaults and strict admission parser; exact Hermes/profile-registry checks; selected-board DB-running count; explicit dry/real `m`; exact multi-start identity/cap reconciliation; additive rollback-compatible receipts; check output; docs/template; behavior and 17-mutant receipts |
+
+## Configurable-cap TDD and mutation evidence
+
+- Frozen contract inputs: plan SHA-256 `3edce15d0305d4e067a028a06aab5f7d0bc1346b8f66b41b7fc04b116cd1cf3f`; addendum SHA-256 `92454021d4d5ae73dabc02d9562dc62a14b4fa7e92e928f37ff5f9a7ae200fbf`; original base `7771e842390d627baa99e1ceee026f2ef20512cd`.
+- Proven-red slices against that base: admission absence/non-default parsing failed with missing field/unknown key; config caps API and explicit profile registry failed; configured inventory and dispatch-maximum helpers were absent; board snapshots lacked `hermes_db_running_count`; explicit dry/real `m=2` failed because builders hard-coded `1`. Exact commands/results are summarized in REQUIREMENT_LEDGER §19.
+- Mutation campaign: 17/17 disposable mutants exited nonzero. It kills host literals in both hold paths, old profile/board-any behavior and ignored overrides, four wrong `m` sources/values, multi-row dry-run acceptance, weakened task/run/worker set identity, skipped post-profile recount, skipped dwell consumption, weakened Hermes equality, and each changed absent-section default. The complete mutant/test/exit/tree-hash table is in `REQUIREMENT_MATRIX.md`; raw receipt is `/Users/jhaynes/.hermes/profiles/builder/cache/scratch/controller-cap-mutation-receipt.txt`.
+- Final macOS/Linux serial counts, contract-gate result, frozen commit/tree, and deterministic archive digest are written here immediately before freeze.
 
 ## Explicit exclusions
 

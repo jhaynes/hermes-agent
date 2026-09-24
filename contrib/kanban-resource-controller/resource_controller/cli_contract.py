@@ -11,6 +11,10 @@ class CommandContractError(ValueError):
     pass
 
 
+class PrecommandRace(CommandContractError):
+    pass
+
+
 def _prefix(executable: Path, board: str) -> list[str]:
     if not executable.is_absolute():
         raise CommandContractError("Hermes executable must be absolute")
@@ -19,16 +23,34 @@ def _prefix(executable: Path, board: str) -> list[str]:
     return [str(executable), "kanban", "--board", board]
 
 
-def build_dry_run_command(executable: Path, board: str, failure_limit: int) -> list[str]:
+def build_dry_run_command(
+    executable: Path,
+    board: str,
+    failure_limit: int,
+    dispatch_max: int,
+) -> list[str]:
+    _positive_dispatch_max(dispatch_max)
     return _prefix(executable, board) + [
-        "dispatch", "--dry-run", "--max", "1", "--failure-limit", str(failure_limit), "--json"
+        "dispatch", "--dry-run", "--max", str(dispatch_max),
+        "--failure-limit", str(failure_limit), "--json"
     ]
 
 
-def build_dispatch_command(executable: Path, board: str, failure_limit: int) -> list[str]:
+def build_dispatch_command(
+    executable: Path,
+    board: str,
+    failure_limit: int,
+    dispatch_max: int,
+) -> list[str]:
+    _positive_dispatch_max(dispatch_max)
     return _prefix(executable, board) + [
-        "dispatch", "--max", "1", "--failure-limit", str(failure_limit), "--json"
+        "dispatch", "--max", str(dispatch_max), "--failure-limit", str(failure_limit), "--json"
     ]
+
+
+def _positive_dispatch_max(value: int) -> None:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise CommandContractError("dispatch maximum must be a positive integer")
 
 
 def build_decompose_command(executable: Path, board: str, task_id: str) -> list[str]:
@@ -92,6 +114,8 @@ def parse_dispatch_prediction(
     *,
     board: str,
     titles: Mapping[str, str],
+    assignees: Mapping[str, str | None] | None = None,
+    eligible_profiles: tuple[str, ...] | None = None,
 ) -> PredictedPick:
     payload = validate_dispatch_payload(output)
     if payload["skipped_locked"]:
@@ -105,16 +129,25 @@ def parse_dispatch_prediction(
     ):
         raise CommandContractError("dry-run predicted maintenance changes")
     spawned = payload["spawned"]
-    if not isinstance(spawned, list) or len(spawned) != 1 or not isinstance(spawned[0], dict):
-        raise CommandContractError("dry-run must predict exactly one task")
-    row = spawned[0]
-    if set(row) != {"task_id", "assignee", "workspace"}:
-        raise CommandContractError("spawn prediction shape mismatch")
-    task_id = row["task_id"]
-    assignee = row["assignee"]
-    if not isinstance(task_id, str) or not isinstance(assignee, str):
-        raise CommandContractError("spawn prediction identity is invalid")
-    title = titles.get(task_id)
-    if not isinstance(title, str) or not title:
-        raise CommandContractError("predicted task missing from canonical inventory")
+    if not isinstance(spawned, list) or not spawned:
+        raise CommandContractError("dry-run must predict one task")
+    validated: list[tuple[str, str, str]] = []
+    for row in spawned:
+        if not isinstance(row, dict) or set(row) != {"task_id", "assignee", "workspace"}:
+            raise CommandContractError("spawn prediction shape mismatch")
+        task_id = row["task_id"]
+        assignee = row["assignee"]
+        if not isinstance(task_id, str) or not isinstance(assignee, str):
+            raise CommandContractError("spawn prediction identity is invalid")
+        title = titles.get(task_id)
+        if not isinstance(title, str) or not title:
+            raise CommandContractError("predicted task missing from selected board inventory")
+        if assignees is not None and assignees.get(task_id) != assignee:
+            raise CommandContractError("predicted assignee differs from fenced board inventory")
+        if eligible_profiles is not None and assignee not in eligible_profiles:
+            raise CommandContractError("predicted profile is not dispatch-eligible")
+        validated.append((task_id, assignee, title))
+    if len(validated) > 1:
+        raise PrecommandRace("dry-run exposed more than one open slot")
+    task_id, assignee, title = validated[0]
     return PredictedPick(board, task_id, assignee, title)

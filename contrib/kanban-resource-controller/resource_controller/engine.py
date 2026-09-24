@@ -4,8 +4,15 @@ from dataclasses import dataclass
 import time
 from typing import Mapping, Protocol, Sequence
 
+from .cli_contract import PrecommandRace
 from .config import ControllerConfig
-from .inventory import LiveWorker, admission_capacity
+from .inventory import (
+    Capacity,
+    LiveWorker,
+    admission_capacity,
+    dispatch_maximum,
+    existing_capacity_violation,
+)
 from .policy import AdmissionPolicy, HostSample
 from .priority import PredictedPick, select_pick
 from .storage import SecureStateStore
@@ -29,6 +36,8 @@ class BoardView:
     titles: Mapping[str, str]
     assignees: Mapping[str, str | None]
     triage_task: str | None
+    hermes_db_running_count: int = 0
+    eligible_profiles: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,7 +55,12 @@ class GateSnapshot:
 @dataclass(frozen=True)
 class CommandOutcome:
     uncertain: bool
-    actual_task_id: str | None
+    actual_task_ids: tuple[str, ...] = ()
+    spawned: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def actual_task_id(self) -> str | None:
+        return self.actual_task_ids[0] if self.actual_task_ids else None
 
 
 @dataclass(frozen=True)
@@ -60,8 +74,8 @@ class World(Protocol):
 
 
 class Commands(Protocol):
-    def predict(self, board: BoardView, failure_limit: int) -> PredictedPick: ...
-    def dispatch(self, pick: PredictedPick, failure_limit: int) -> CommandOutcome: ...
+    def predict(self, board: BoardView, failure_limit: int, dispatch_max: int) -> PredictedPick: ...
+    def dispatch(self, pick: PredictedPick, failure_limit: int, dispatch_max: int) -> CommandOutcome: ...
     def decompose(self, board: str, task_id: str) -> CommandOutcome: ...
 
 
@@ -115,13 +129,40 @@ class ControllerEngine:
             )
 
         predictions: list[PredictedPick] = []
+        board_caps_held = 0
         for board in initial.boards:
+            if (
+                sum(worker.board == board.board for worker in initial.workers)
+                >= initial.config.admission_caps.for_board(board.board)
+            ):
+                board_caps_held += 1
+                continue
+            dispatch_max = dispatch_maximum(
+                initial.config.admission_caps,
+                board=board.board,
+                hermes_db_running_count=board.hermes_db_running_count,
+            )
+            if dispatch_max is None:
+                continue
             try:
-                predictions.append(self.commands.predict(board, initial.config.failure_limit))
+                pick = self.commands.predict(board, initial.config.failure_limit, dispatch_max)
+                if pick.assignee not in initial.config.dispatch_profiles:
+                    continue
+                predictions.append(pick)
+            except PrecommandRace:
+                return self._result(
+                    "precommand-race", sample=initial.sample,
+                    observed_blockers=health.observed_blockers,
+                )
             except Exception:
                 # Binding amendment: prediction ambiguity makes this board only ineligible.
                 continue
         if not predictions:
+            if board_caps_held == len(initial.boards):
+                return self._result(
+                    "board-cap", sample=initial.sample,
+                    observed_blockers=health.observed_blockers,
+                )
             self.pointer = (self.pointer + 1) % len(initial.boards)
             return self._result("prediction-unavailable", sample=initial.sample, observed_blockers=health.observed_blockers)
         order = [board.board for board in initial.boards]
@@ -133,7 +174,12 @@ class ControllerEngine:
         )
         self.pointer = selection.next_pointer
         pick = selection.pick
-        capacity = admission_capacity(initial.workers, board=pick.board, profile=pick.assignee or "")
+        capacity = admission_capacity(
+            initial.workers,
+            caps=initial.config.admission_caps,
+            board=pick.board,
+            profile=pick.assignee or "",
+        )
         if not capacity.available:
             return self._result(capacity.reason, sample=initial.sample, observed_blockers=health.observed_blockers)
         return self._execute(
@@ -153,7 +199,7 @@ class ControllerEngine:
             return "manual-hold"
         if snapshot.unowned_subscriptions:
             return "unowned-subscriptions"
-        if len(snapshot.workers) >= 2:
+        if len(snapshot.workers) >= snapshot.config.admission_caps.host_cap:
             return "host-cap"
         if not snapshot.boards:
             return "no-boards"
@@ -194,9 +240,22 @@ class ControllerEngine:
             return self._result(hold, sample=final.sample, observed_blockers=final_health.observed_blockers)
         if kind == "dispatch":
             assert profile is not None and predicted is not None
-            capacity = admission_capacity(final.workers, board=board, profile=profile)
+            capacity = admission_capacity(
+                final.workers,
+                caps=final.config.admission_caps,
+                board=board,
+                profile=profile,
+            )
             if not capacity.available:
                 return self._result(capacity.reason, sample=final.sample, observed_blockers=final_health.observed_blockers)
+            board_view = next(item for item in final.boards if item.board == board)
+            dispatch_max = dispatch_maximum(
+                final.config.admission_caps,
+                board=board,
+                hermes_db_running_count=board_view.hermes_db_running_count,
+            )
+            if dispatch_max is None:
+                return self._result("board-cap", sample=final.sample, observed_blockers=final_health.observed_blockers)
 
         if selection_passed is not None:
             self.passed = selection_passed
@@ -213,24 +272,82 @@ class ControllerEngine:
             if kind == "decompose":
                 outcome = self.commands.decompose(board, task_id)
             else:
-                outcome = self.commands.dispatch(predicted, final.config.failure_limit)  # type: ignore[arg-type]
+                outcome = self.commands.dispatch(  # type: ignore[arg-type]
+                    predicted, final.config.failure_limit, dispatch_max,
+                )
         except BaseException:
             return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
         if outcome.uncertain:
             return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
 
+        violation: Capacity | None = None
+        if kind == "dispatch":
+            try:
+                post = self.world.capture()
+                actual_task_ids, violation = self._reconcile_dispatch(
+                    final, post, outcome, predicted, dispatch_max,  # type: ignore[arg-type]
+                )
+            except Exception:
+                return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
+            if violation is not None:
+                return self._result(
+                    "uncertain-outcome",
+                    sample=post.sample,
+                    observed_blockers=final_health.observed_blockers,
+                    cap_violation=violation,
+                )
+        else:
+            actual_task_ids = outcome.actual_task_ids
+
         journal["outcome"] = "reconciled"
-        journal["actual_task_id"] = outcome.actual_task_id
+        journal["actual_task_ids"] = list(actual_task_ids)
+        journal["actual_task_id"] = actual_task_ids[0] if actual_task_ids else None
+        journal["extra_starts"] = max(0, len(actual_task_ids) - 1)
         self.store.write_json("pending.json", journal)
-        if kind == "dispatch" and outcome.actual_task_id not in (None, task_id):
+        if kind == "dispatch" and actual_task_ids and actual_task_ids[0] != task_id:
             self.priority_misses += 1
-            return self._result("priority-miss", sample=final.sample, observed_blockers=final_health.observed_blockers)
+            return self._result(
+                "priority-miss", sample=final.sample,
+                observed_blockers=final_health.observed_blockers,
+                actual_task_ids=actual_task_ids,
+            )
         if kind == "decompose":
             return self._result("decomposed", sample=final.sample, observed_blockers=final_health.observed_blockers)
         return self._result(
-            "dispatched" if outcome.actual_task_id else "dispatch-noop",
+            "dispatched" if actual_task_ids else "dispatch-noop",
             sample=final.sample,
             observed_blockers=final_health.observed_blockers,
+            actual_task_ids=actual_task_ids,
+        )
+
+    def _reconcile_dispatch(
+        self,
+        baseline: GateSnapshot,
+        post: GateSnapshot,
+        outcome: CommandOutcome,
+        predicted: PredictedPick,
+        dispatch_max: int,
+    ) -> tuple[tuple[str, ...], Capacity | None]:
+        claims = outcome.spawned
+        if len(claims) > dispatch_max or len({task_id for task_id, _ in claims}) != len(claims):
+            raise RuntimeError("invalid dispatch claim set")
+        board = next(item for item in baseline.boards if item.board == predicted.board)
+        for task_id, profile in claims:
+            if task_id not in board.titles or board.assignees.get(task_id) != profile:
+                raise RuntimeError("dispatch claim is outside the fenced candidate set")
+            if profile not in baseline.config.dispatch_profiles:
+                raise RuntimeError("dispatch claim uses an ineligible profile")
+        before = {_worker_identity(worker) for worker in baseline.workers}
+        after = {_worker_identity(worker) for worker in post.workers}
+        new_workers = after - before
+        claimed = {(task_id, profile) for task_id, profile in claims}
+        observed = {(identity[0], identity[5]) for identity in new_workers}
+        if observed != claimed or len(new_workers) != len(claims):
+            raise RuntimeError("CLI claims do not match newly reconciled worker identities")
+        if post.config != baseline.config:
+            raise RuntimeError("configuration changed after dispatch")
+        return tuple(task_id for task_id, _ in claims), existing_capacity_violation(
+            post.workers, post.config.admission_caps,
         )
 
     def _result(
@@ -239,6 +356,8 @@ class ControllerEngine:
         *,
         sample: HostSample | None = None,
         observed_blockers: tuple[str, ...] = (),
+        actual_task_ids: tuple[str, ...] = (),
+        cap_violation: Capacity | None = None,
     ) -> TickResult:
         payload: dict[str, object] = {
             "schema_version": telemetry_constants.SCHEMA_VERSION,
@@ -248,7 +367,17 @@ class ControllerEngine:
             "passed_windows": self.passed,
             "round_robin_pointer": self.pointer,
             "observed_blockers": list(observed_blockers),
+            "actual_task_ids": list(actual_task_ids),
+            "actual_task_id": actual_task_ids[0] if actual_task_ids else None,
+            "extra_starts": max(0, len(actual_task_ids) - 1),
         }
+        if cap_violation is not None:
+            payload["cap_violation"] = {
+                "reason": cap_violation.reason,
+                "name": cap_violation.name,
+                "count": cap_violation.count,
+                "cap": cap_violation.cap,
+            }
         if sample is not None:
             wall_time = time.time()
             interval_seconds = None
@@ -278,3 +407,15 @@ class ControllerEngine:
             self._previous_wall_time = wall_time
         self.store.write_json("status.json", payload)
         return TickResult(reason, self.priority_misses)
+
+
+def _worker_identity(worker: LiveWorker) -> tuple[object, ...]:
+    return (
+        worker.task_id,
+        worker.run_id,
+        worker.pid,
+        worker.created_at,
+        worker.board,
+        worker.profile,
+        worker.worker_fingerprint,
+    )

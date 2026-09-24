@@ -20,9 +20,32 @@ _KEYS = {
     "hermes_executable", "hermes_home", "source_root", "expected_source_commit",
     "dispatcher_lock", "state_dir", "boards", "interval_seconds",
 }
-_OPTIONAL_KEYS = {"telemetry"}
+_OPTIONAL_KEYS = {"telemetry", "admission"}
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
+_ADMISSION_KEYS = {
+    "host_cap", "profile_cap", "profile_overrides", "board_cap", "board_overrides",
+}
+DEFAULT_HOST_CAP, DEFAULT_PROFILE_CAP, DEFAULT_BOARD_CAP = 2, 1, 1
+
+
+@dataclass(frozen=True)
+class AdmissionCaps:
+    host_cap: int
+    profile_cap: int
+    profile_overrides: tuple[tuple[str, int], ...]
+    board_cap: int
+    board_overrides: tuple[tuple[str, int], ...]
+
+    def for_profile(self, profile: str) -> int:
+        return dict(self.profile_overrides).get(profile, self.profile_cap)
+
+    def for_board(self, board: str) -> int:
+        return dict(self.board_overrides).get(board, self.board_cap)
+
+    @property
+    def maximum_profile_cap(self) -> int:
+        return max((self.profile_cap, *(value for _, value in self.profile_overrides)))
 
 
 @dataclass(frozen=True)
@@ -35,6 +58,7 @@ class RuntimeSpec:
     state_dir: Path
     boards: Mapping[str, Path]
     interval_seconds: int
+    admission_caps: AdmissionCaps
     linux_psi_some_avg10_warning: float = constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING
     linux_psi_full_avg10_critical: float = constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL
 
@@ -82,6 +106,9 @@ class RuntimeSpec:
             pass
         else:
             raise SpecError("state_dir must be outside installed source")
+        admission_caps = _admission_caps(
+            raw.get("admission"), boards, present="admission" in raw,
+        )
         some_warning, full_critical = _linux_psi(raw.get("telemetry"))
         return cls(
             paths["hermes_executable"],
@@ -92,9 +119,52 @@ class RuntimeSpec:
             paths["state_dir"],
             boards,
             interval,
+            admission_caps,
             some_warning,
             full_critical,
         )
+
+
+def _admission_caps(
+    admission: object,
+    boards: Mapping[str, Path],
+    *,
+    present: bool,
+) -> AdmissionCaps:
+    if not present:
+        return AdmissionCaps(
+            DEFAULT_HOST_CAP, DEFAULT_PROFILE_CAP, (), DEFAULT_BOARD_CAP, (),
+        )
+    if not isinstance(admission, dict) or set(admission) != _ADMISSION_KEYS:
+        raise SpecError("admission keys do not match the pinned contract")
+    host_cap = _positive_int(admission["host_cap"], "admission.host_cap")
+    profile_cap = _positive_int(admission["profile_cap"], "admission.profile_cap")
+    board_cap = _positive_int(admission["board_cap"], "admission.board_cap")
+    profile_overrides = _override_map(admission["profile_overrides"], "profile_overrides")
+    board_overrides = _override_map(admission["board_overrides"], "board_overrides")
+    if profile_cap > host_cap or any(value > host_cap for _, value in profile_overrides):
+        raise SpecError("effective profile caps must not exceed admission.host_cap")
+    unknown_boards = set(dict(board_overrides)) - set(boards)
+    if unknown_boards:
+        raise SpecError(f"unknown board override: {sorted(unknown_boards)[0]}")
+    return AdmissionCaps(host_cap, profile_cap, profile_overrides, board_cap, board_overrides)
+
+
+def _positive_int(value: object, key: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+        raise SpecError(f"{key} must be a positive integer")
+    return value
+
+
+def _override_map(value: object, key: str) -> tuple[tuple[str, int], ...]:
+    if not isinstance(value, dict):
+        raise SpecError(f"admission.{key} must be an object")
+    parsed: list[tuple[str, int]] = []
+    for name, cap in value.items():
+        if not isinstance(name, str) or not _SLUG.fullmatch(name):
+            raise SpecError(f"admission.{key} name is invalid")
+        parsed.append((name, _positive_int(cap, f"admission.{key}.{name}")))
+    return tuple(sorted(parsed))
 
 
 def _linux_psi(telemetry: object) -> tuple[float, float]:

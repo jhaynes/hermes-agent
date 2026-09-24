@@ -4,7 +4,7 @@
 
 **Goal:** Define the smallest external, unactivated helper that admits automatic Kanban build work only when the host is healthy, while preserving existing workers and leaving Desktop, cron, and messaging available.
 
-**Architecture:** A standalone Python helper outside installed Hermes source samples Darwin host telemetry, reconciles canonical board/run state with exact live process identities, and invokes only supported Hermes CLI mutation paths. It owns the gateway dispatcher singleton lock for its active lifetime, performs at most one side-effecting command in each recovered eligibility window, and fails closed on ambiguity. Installation, service changes, activation, and live production dispatch are separate release-owner work.
+**Architecture:** A standalone Python helper outside installed Hermes source samples host telemetry, reconciles canonical board/run state with exact live process identities, and invokes only supported Hermes CLI mutation paths. It owns the gateway dispatcher singleton lock for its active lifetime, performs at most one mutating command in each recovered eligibility window (read-only dry runs excluded), and fails closed on ambiguity. Installation, service changes, activation, and live production dispatch are separate release-owner work.
 
 **Tech stack:** Retained Hermes Python 3.11 environment and existing `psutil`; Python standard library; supported Hermes CLI; read-only SQLite URI transactions for validated inventory; per-user file locking and restrictive atomic JSON/log storage; serial `unittest` or the repository-approved serial runner.
 
@@ -73,7 +73,7 @@ The retained prior candidate at `/Users/jhaynes/.hermes/hermes-agent/.worktrees/
 4. No private dispatcher imports. Mutations use supported CLI commands only. Read-only canonical inventory may use validated SQLite contracts because supported observation currently has side effects.
 5. No recurring LLM inference in the control loop. A single supported decomposition may invoke the existing configured auxiliary model only when live `auto_decompose` is true and all other admission gates pass.
 6. No `--all`, `dispatch --max 0`, standalone daemon, direct API dispatch, or production queue tests.
-7. Exactly one side-effecting command against exactly one board in a recovered eligibility window: either one decomposition or one dispatch. Never both.
+7. At most one mutating command against exactly one board in a recovered eligibility window: either one decomposition or one dispatch. Never both. Read-only dry runs do not count.
 8. Run tests serially, one test process/native thread budget at a time, with fake or isolated homes/boards/processes and harmless finite workers.
 9. Keep every operational artifact outside installed Hermes source. The linked worktree is staging only, not installation.
 10. Preserve the old unreleased load-adaptive branch and all unique/dirty worktrees.
@@ -98,9 +98,9 @@ Allowed form for one explicitly selected triage card:
 
 Allowed form for one selected board:
 
-`hermes kanban --board <slug> dispatch --max 1 --failure-limit <configured-positive-int> --json`
+`hermes kanban --board <slug> dispatch --max <computed-positive-m> --failure-limit <configured-positive-int> --json`
 
-At baseline, `hermes_cli/kanban_ops.py:60-108` loads the effective default-profile caps and passes them to `dispatch_once`. `hermes_cli/kanban_db_dispatch.py:1739-1775` defines `--max 1` as live per-board concurrency (already-running plus this tick), not a promise of exactly one start. The same source applies a host-wide `max_in_progress` across boards. The helper must never label `--max 1` a one-start flag.
+At baseline, `hermes_cli/kanban_ops.py:60-108` loads the effective default-profile caps and passes them to `dispatch_once`. `hermes_cli/kanban_db_dispatch.py:1739-1775` defines `--max` as live per-board concurrency (already-running plus this tick), not a new-start count. C′ therefore supplies `m = min(effective board cap, fenced selected-board database-running count + 1)` to dry and real dispatch; it never labels `--max` a one-start flag.
 
 Every supported dispatch tick performs reclaim/promotion before the spawn gate (`kanban_db_dispatch.py:1716-1736, 1853-1867`). Therefore no dispatch command may run during resource, ESTOP, manual, capacity, identity, compatibility, or uncertainty holds. The helper must reconcile before and after every command and must not retry an uncertain dispatch.
 
@@ -108,7 +108,7 @@ Every supported dispatch tick performs reclaim/promotion before the spawn gate (
 
 The supported dispatch CLI accepts a board, not a task/stage selector. Within a board, baseline dispatch orders each lane by priority then creation time (`kanban_db_dispatch.py:1800-1806`), runs ready work before review while reserving one slot for review when possible (`1869-1933`), and can mutate maintenance state before selecting a worker. An external observer cannot atomically guarantee that the task it predicted remains the task selected.
 
-Justin resolved B-001/B-002 in the binding amendment dated 2026-09-22. The helper uses per-board supported `dispatch --dry-run --max 1`, classifies predicted picks deterministically as merge-conflict > review > build, selects by stage with round-robin ties, and grants one aging admission after six passed healthy windows. The accepted dry-run-to-dispatch race is logged as `priority_miss`; it never triggers a retry, second command, or worker kill. Status must call the policy `best-effort downstream-first`, never guaranteed priority.
+Justin resolved B-001/B-002 in the binding amendment dated 2026-09-22. Section 19 further amends dispatch to per-board supported `dispatch --dry-run --max <m>`, classifies predicted picks deterministically as merge-conflict > review > build, selects by stage with round-robin ties, and grants one aging admission after six passed healthy windows. The accepted dry-run-to-dispatch race never triggers a retry, second mutating command, or worker kill. Status calls the policy `best-effort downstream-first`, never guaranteed priority.
 
 ## 5. Configuration compatibility and refusal rules
 
@@ -125,7 +125,7 @@ Required active-mode values or semantics:
 - `kanban.dispatch_stale_timeout_seconds` is `0`, or activation remains blocked. Baseline effective default is `14400`, but `_cmd_dispatch` does not pass it and `dispatch_once` defaults to `0`; no CLI flag provides parity.
 - `kanban.review_dispatch`, `kanban.default_assignee`, and any `kanban.dispatch_profiles` restriction must be demonstrably honored by the supported CLI at the pinned source. Unknown/non-equivalent settings hold.
 - `kanban.auto_decompose_per_tick` does not enlarge the helper's one-action window; the binding controller policy is stricter.
-- Explicit `--max 1` intentionally overrides `kanban.max_spawn` for this helper.
+- Explicit computed `--max <m>` intentionally overrides `kanban.max_spawn` for this helper.
 - Source commit/contract mismatch, unsupported schema, output-shape drift, missing required columns, too-large bounded inventory, or command parsing drift are persistent compatibility holds pending re-review.
 
 The builder must not change incompatible production settings. Report the exact key/value mismatch for release-owner disposition.
@@ -174,10 +174,10 @@ Recheck resource telemetry immediately before a command. Every possible side-eff
 
 ### 8.1 Admission caps
 
-- Host admission ceiling: two exact matching live workers across all discovered boards and both ready/review lanes.
+- Host admission ceiling: `admission.host_cap` exact matching live workers across all configured boards.
 - Existing excess workers are allowed to finish; they cause a capacity hold.
-- Per-profile ceiling: one live worker, retaining the configured defense-in-depth cap.
-- Per-board automatic concurrency: one via `dispatch --max 1` plus pre-command canonical reconciliation.
+- Per-profile ceiling: effective blanket/override cap; Hermes's global cap equals the largest effective value.
+- Per-board automatic concurrency: configured blanket/override cap; C′ sends selected-board `m` plus pre-command canonical reconciliation.
 - Terminal-card workers continue to consume capacity while their exact process identity lives.
 - Manual CLI/API/agent starts and worker-internal fan-out are documented bypasses. This is admission control, not an atomic global semaphore.
 
@@ -258,7 +258,7 @@ Each behavior is a vertical RED→GREEN slice after blockers are resolved. Keep 
 | T-005 | Singleton lock | Two isolated processes contend; exactly one owns authority; CLOEXEC/non-inheritance verified; observation does not take dispatcher lock; recovery only after real release. |
 | T-006 | Config refusal | Each required key wrong/missing/type-invalid independently; malformed YAML; source baseline drift; schema/output mismatch; dispatch-stale nonzero; embedded dispatcher true. |
 | T-007 | Supported CLI decomposition | Isolated board invokes exactly one task id with author/json; `--all` absent; live auto-decompose false prevents call; result task mismatch holds. |
-| T-008 | Dispatch semantics | Real isolated supported CLI with harmless finite worker proves `--max 1` board concurrency, no second board worker while first lives, host cap 2, profile cap 1, and no `--max 0`. |
+| T-008 | Dispatch semantics | Real isolated supported CLI with harmless finite worker proves successive explicit computed `m`, configured non-default host/profile/board boundaries, selected-board database-running counts, and no `--max 0`. |
 | T-009 | One command/window | Eligible window chooses decomposition OR dispatch; success/no-op/nonzero/timeout/parse failure each consumes window; no same-window retry. |
 | T-010 | Round selection safety | No round-robin acceptance test may claim downstream-first. Add tests only after blocker B-001's approved mechanism is recorded; verify merge/review/test/build contention and starvation policy. |
 | T-011 | Pre-command races | Inject config, ESTOP, manual hold, task state, process, and telemetry changes between selection and execute; each prevents command. |
@@ -399,4 +399,20 @@ No change to thresholds, caps, telemetry, lock, or lifecycle behavior from §17 
 - RUNBOOK: pending-journal recovery after `uncertain-outcome` (plan decision 8), with still-running/finished/other branches, byte copy plus sha256, and an atomic reconciled rewrite through `SecureStateStore.write_json`.
 - Newly killed mutants (9): NULL bypass; skipping the second read; no `IdentityUnstable` raise; recapture that does not re-collect; environment read outside the bracket; gate without the HEAD check; gate returning 0 on missing env; gate accepting skips; no pre-regex length check.
 - Not fixed in the package: the gate is mandatory by procedure (RUNBOOK install step and the release checklist on card t_0aa43069), not by CI. There is no CI job for this contrib package.
+
+## 19. Configurable admission caps and C′ dispatch amendment (2026-09-24)
+
+Binding sources: approved plan `/Users/jhaynes/.hermes/plans/kanban-controller-configurable-caps.md`, SHA-256 `3edce15d0305d4e067a028a06aab5f7d0bc1346b8f66b41b7fc04b116cd1cf3f`, and binding addendum `/Users/jhaynes/.hermes/plans/kanban-controller-configurable-caps-addendum-1.md`, SHA-256 `92454021d4d5ae73dabc02d9562dc62a14b4fa7e92e928f37ff5f9a7ae200fbf`. This section supersedes fixed-cap and literal `--max 1` statements in §§4.3, 5, 8.1, 12/T-008–T-012, and §17's “no cap change” sentence. It does not change telemetry, thresholds, dwell duration, lock, lifecycle, or worker identity.
+
+- `controller.json.admission` is the sole controller policy source: positive-integer `host_cap`, `profile_cap`, `profile_overrides`, `board_cap`, and `board_overrides`. The absent-section 2/1/1 values are declared once in `spec.py`. Effective profile caps cannot exceed host; board override names must be configured boards; profile override names must be members of a fresh explicit, nonempty, duplicate-free `kanban.dispatch_profiles` registry.
+- Hermes remains defense in depth: raw `kanban.max_in_progress` must equal controller host; raw `kanban.max_in_progress_per_profile` must equal the largest effective controller profile cap. Mismatch is visible and nonzero in `check`; the helper never rewrites config.
+- Each board snapshot records `hermes_db_running_count` (`tasks.status='running'`) separately from `controller_reconciled_live_count` (all exact living workers, including terminal-card processes). Both are fingerprinted. Admission uses the latter. C′ computes `m = min(effective board cap, hermes_db_running_count + 1)` from the selected final fenced board and sends the same explicit positive `m` to dry run and real dispatch. At cap it holds and never emits `--max 0`.
+- The eligibility-window invariant is **at most one mutating dispatch command** (or one decomposition). Read-only dry runs do not count. A valid dry run has zero or one row; more than one is `precommand-race` with no real command. Every row belongs to the selected board's fenced candidate set and an eligible profile.
+- Normal operation leaves one Hermes board slot. A completion race may let the one mutating command start extras up to Hermes's host/global-profile limits and board `m`. Those are the only preventive bounds. Stricter controller-only limits are verified afterward, never described as Hermes-enforced; violation is persistent uncertainty, workers continue, and nothing is killed.
+- Post-command evidence compares full `(task id, run id, worker identity)` pre/post sets. Ordered CLI rows must exactly equal new identities; the first row retains prediction semantics; finished baseline workers are allowed; unrelated/manual arrivals, missing identities, duplicates, malformed rows, more than `m`, or any post-cap violation stay uncertain.
+- New writers dual-write scalar `actual_task_id` (first id or null), ordered `actual_task_ids`, and `extra_starts`; status schema remains 2 and fields are additive. Old scalar and new dual-written reconciled journals are nonblocking; all pending/uncertain forms block. Rollback drains, requires reconciled pending state, checkpoints state, archives/removes status, and restores the prior controller JSON before the old binary.
+- A valid multi-start consumes the command window before launch and restarts the full recovery dwell. `status.json` records the bounded receipt; cap uncertainty records reason/name/count/cap.
+- Rollout preflight inspects `kanban.dispatch_profiles` for absent/null/empty before installing the binary. Cap changes use hold → stop → edit controller and matching Hermes values → check → restart held → resume.
+
+TDD receipts: parser/config/inventory/database-count/explicit-`m` tests were observed failing against base `7771e842390d627baa99e1ceee026f2ef20512cd` before their implementation slices (missing admission field, rejected admission key, missing caps argument/helper/count, and fixed `--max 1`). The completed suite adds non-default host/profile/board boundaries, final-fence and multi-start identity reconciliation, profile/host post-cap uncertainty, dual-written rollback compatibility, check-output mismatch/counts, and one-mutating-command/recovery-dwell evidence. Mutation receipts and final platform counts are recorded in `REQUIREMENT_MATRIX.md` and `PACKAGE_MANIFEST.md` at freeze time.
 

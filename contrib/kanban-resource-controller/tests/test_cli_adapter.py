@@ -50,18 +50,51 @@ class CliAdapterTests(unittest.TestCase):
 
     def test_prediction_is_read_only_bounded_and_parsed(self) -> None:
         board = BoardView("alpha", {"t_1": "Review"}, {"t_1": "reviewscope"}, None)
-        pick = self.adapter.predict(board, 2)
+        pick = self.adapter.predict(board, 2, 3)
         self.assertEqual(pick, PredictedPick("alpha", "t_1", "reviewscope", "Review"))
         self.assertIn("--dry-run", self.calls[0][0])
         self.assertEqual(self.calls[0][1:], (15.0, 65536))
 
     def test_dispatch_is_one_command_and_uses_post_reconciliation(self) -> None:
         pick = PredictedPick("alpha", "t_1", "reviewscope", "Review")
-        outcome = self.adapter.dispatch(pick, 2)
+        outcome = self.adapter.dispatch(pick, 2, 3)
         self.assertFalse(outcome.uncertain)
         self.assertEqual(outcome.actual_task_id, "t_1")
         self.assertNotIn("--dry-run", self.calls[0][0])
+        self.assertEqual(self.calls[0][0][self.calls[0][0].index("--max") + 1], "3")
         self.assertEqual(self.calls[0][1], 30.0)
+
+    def test_multi_start_claims_are_retained_and_invalid_claims_are_uncertain(self) -> None:
+        base = {
+            "reclaimed": 0, "crashed": [], "timed_out": [], "stale": [],
+            "auto_blocked": [], "promoted": 0, "skipped_unassigned": [],
+            "skipped_nonspawnable": [], "skipped_per_profile_capped": [],
+            "auto_assigned_default": [], "reaped_terminal_workers": [],
+            "respawn_guarded": [], "rate_limited": [], "skipped_locked": False,
+            "memory_pressure": None,
+        }
+
+        def adapter(spawned) -> CliCommands:
+            payload = {**base, "spawned": spawned}
+            return CliCommands(
+                Path("/opt/hermes/bin/hermes"),
+                runner=lambda argv, timeout, limit: CommandResult(
+                    tuple(argv), 0, json.dumps(payload), "", False, False,
+                ),
+                reconcile_actual=lambda _board, _before: None,
+            )
+
+        rows = [
+            {"task_id": "t_1", "assignee": "builder", "workspace": None},
+            {"task_id": "t_2", "assignee": "builder", "workspace": None},
+        ]
+        pick = PredictedPick("a", "t_1", "builder", "Build")
+        outcome = adapter(rows).dispatch(pick, 2, 2)
+        self.assertEqual(outcome.spawned, (("t_1", "builder"), ("t_2", "builder")))
+        self.assertFalse(outcome.uncertain)
+        self.assertTrue(adapter(rows).dispatch(pick, 2, 1).uncertain)
+        self.assertTrue(adapter([rows[0], rows[0]]).dispatch(pick, 2, 2).uncertain)
+        self.assertTrue(adapter([{"task_id": "t_1"}]).dispatch(pick, 2, 1).uncertain)
 
     def test_timeout_or_bad_decomposition_is_uncertain(self) -> None:
         def timed(argv: list[str], timeout: float, limit: int) -> CommandResult:
@@ -72,7 +105,7 @@ class CliAdapterTests(unittest.TestCase):
             runner=timed,
             reconcile_actual=lambda _board, _before: None,
         )
-        self.assertTrue(adapter.dispatch(PredictedPick("a", "t_1", "builder", "Build"), 2).uncertain)
+        self.assertTrue(adapter.dispatch(PredictedPick("a", "t_1", "builder", "Build"), 2, 1).uncertain)
         self.assertTrue(adapter.decompose("a", "t_triage").uncertain)
 
     def test_decomposition_requires_requested_task_and_confirmed_success(self) -> None:

@@ -4,6 +4,7 @@ from dataclasses import dataclass
 import re
 from typing import Mapping, Sequence
 
+from .spec import AdmissionCaps
 from .worker_identity import IdentityHold, StoredFingerprint, matches
 
 
@@ -91,12 +92,16 @@ class LiveWorker:
     created_at: float
     profile: str
     task_status: str
+    worker_fingerprint: str = ""
 
 
 @dataclass(frozen=True)
 class Capacity:
     available: bool
     reason: str
+    name: str | None = None
+    count: int | None = None
+    cap: int | None = None
 
 
 def reconcile_workers(
@@ -158,6 +163,7 @@ def reconcile_workers(
                 process.created_at,
                 run.profile,
                 run.task_status,
+                run.worker_fingerprint.raw,
             )
         )
     missing = set(by_pid) - matched
@@ -169,13 +175,57 @@ def reconcile_workers(
 def admission_capacity(
     workers: Sequence[LiveWorker],
     *,
+    caps: AdmissionCaps,
     board: str,
     profile: str,
 ) -> Capacity:
-    if len(workers) >= 2:
-        return Capacity(False, "host-cap")
-    if any(worker.profile == profile for worker in workers):
-        return Capacity(False, "profile-cap")
-    if any(worker.board == board for worker in workers):
-        return Capacity(False, "board-cap")
+    controller_reconciled_live_count = len(workers)
+    if controller_reconciled_live_count >= caps.host_cap:
+        return Capacity(False, "host-cap", "host", controller_reconciled_live_count, caps.host_cap)
+    profile_count = sum(worker.profile == profile for worker in workers)
+    profile_cap = caps.for_profile(profile)
+    if profile_count >= profile_cap:
+        return Capacity(False, "profile-cap", profile, profile_count, profile_cap)
+    board_count = sum(worker.board == board for worker in workers)
+    board_cap = caps.for_board(board)
+    if board_count >= board_cap:
+        return Capacity(False, "board-cap", board, board_count, board_cap)
     return Capacity(True, "available")
+
+
+def existing_capacity_violation(
+    workers: Sequence[LiveWorker],
+    caps: AdmissionCaps,
+) -> Capacity | None:
+    controller_reconciled_live_count = len(workers)
+    if controller_reconciled_live_count > caps.host_cap:
+        return Capacity(False, "host-cap", "host", controller_reconciled_live_count, caps.host_cap)
+    for profile in sorted({worker.profile for worker in workers}):
+        count = sum(worker.profile == profile for worker in workers)
+        cap = caps.for_profile(profile)
+        if count > cap:
+            return Capacity(False, "profile-cap", profile, count, cap)
+    for board in sorted({worker.board for worker in workers}):
+        count = sum(worker.board == board for worker in workers)
+        cap = caps.for_board(board)
+        if count > cap:
+            return Capacity(False, "board-cap", board, count, cap)
+    return None
+
+
+def dispatch_maximum(
+    caps: AdmissionCaps,
+    *,
+    board: str,
+    hermes_db_running_count: int,
+) -> int | None:
+    if (
+        not isinstance(hermes_db_running_count, int)
+        or isinstance(hermes_db_running_count, bool)
+        or hermes_db_running_count < 0
+    ):
+        raise ValueError("hermes_db_running_count must be a nonnegative integer")
+    board_cap = caps.for_board(board)
+    if hermes_db_running_count >= board_cap:
+        return None
+    return min(board_cap, hermes_db_running_count + 1)

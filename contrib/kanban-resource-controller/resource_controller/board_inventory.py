@@ -22,6 +22,7 @@ class BoardSnapshot:
     assignees: Mapping[str, str | None]
     statuses: Mapping[str, str]
     runs: tuple[CanonicalRun, ...]
+    hermes_db_running_count: int
     unowned_subscriptions: int
 
 
@@ -73,6 +74,9 @@ def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> B
         if len(run_rows) > max_rows:
             raise BoardInventoryError("active run row bound exceeded")
         runs = tuple(_canonical_run(row, board) for row in run_rows)
+        hermes_db_running_count = int(
+            connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0]
+        )
         unowned = int(
             connection.execute(
                 "SELECT COUNT(*) FROM kanban_notify_subs "
@@ -93,6 +97,7 @@ def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> B
         assignees={row["id"]: row["assignee"] for row in candidates},
         statuses={row["id"]: row["status"] for row in candidates},
         runs=runs,
+        hermes_db_running_count=hermes_db_running_count,
         unowned_subscriptions=unowned,
     )
 

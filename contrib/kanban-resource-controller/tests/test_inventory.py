@@ -5,14 +5,18 @@ import unittest
 from resource_controller.inventory import (
     CanonicalRun,
     IdentityHold,
+    LiveWorker,
     ProcessSnapshot,
     admission_capacity,
+    dispatch_maximum,
     parse_worker_argv,
     reconcile_workers,
 )
 from resource_controller.worker_identity import parse_stored_fingerprint
+from resource_controller.spec import AdmissionCaps
 
 EPOCH = "b3d1e2:1"
+CAPS = AdmissionCaps(4, 1, (("builder", 2),), 1, (("alpha", 4),))
 
 
 class WorkerArgvTests(unittest.TestCase):
@@ -107,9 +111,23 @@ class ReconciliationTests(unittest.TestCase):
 
     def test_capacity_is_host_profile_and_board_admission_only(self) -> None:
         one = self.reconcile([self.canonical()], [self.process()])
-        self.assertEqual(admission_capacity(one, board="beta", profile="reviewer").reason, "available")
-        self.assertEqual(admission_capacity(one, board="beta", profile="builder").reason, "profile-cap")
-        self.assertEqual(admission_capacity(one, board="alpha", profile="reviewer").reason, "board-cap")
+        self.assertEqual(admission_capacity(one, caps=CAPS, board="beta", profile="reviewer").reason, "available")
+        self.assertEqual(admission_capacity(one, caps=CAPS, board="beta", profile="builder").reason, "available")
+        self.assertEqual(admission_capacity(one, caps=CAPS, board="alpha", profile="reviewer").reason, "available")
+
+        builder_two = LiveWorker("beta", "t_2", 8, 43, 2.0, "builder", "done")
+        self.assertEqual(
+            admission_capacity((*one, builder_two), caps=CAPS, board="gamma", profile="builder").reason,
+            "profile-cap",
+        )
+        alpha_four = tuple(
+            LiveWorker("alpha", f"t_{index}", index, index, float(index), f"p{index}", "running")
+            for index in range(4)
+        )
+        self.assertEqual(
+            admission_capacity(alpha_four, caps=AdmissionCaps(5, 5, (), 1, (("alpha", 4),)), board="alpha", profile="new").reason,
+            "board-cap",
+        )
 
         second_run = self.canonical(
             board="beta", task_id="t_2", run_id=8, pid=43, profile="reviewer",
@@ -125,7 +143,24 @@ class ReconciliationTests(unittest.TestCase):
             start_fingerprint=2000,
         )
         workers = self.reconcile([self.canonical(), second_run], [self.process(), second_process])
-        self.assertEqual(admission_capacity(workers, board="gamma", profile="default").reason, "host-cap")
+        four = (*workers,
+            LiveWorker("delta", "t_3", 9, 44, 3.0, "p3", "running"),
+            LiveWorker("epsilon", "t_4", 10, 45, 4.0, "p4", "running"),
+        )
+        self.assertEqual(admission_capacity(workers, caps=CAPS, board="gamma", profile="default").reason, "available")
+        self.assertEqual(admission_capacity(four, caps=CAPS, board="gamma", profile="default").reason, "host-cap")
+
+    def test_dispatch_maximum_uses_selected_board_database_running_count(self) -> None:
+        self.assertEqual(dispatch_maximum(CAPS, board="alpha", hermes_db_running_count=0), 1)
+        self.assertEqual(dispatch_maximum(CAPS, board="alpha", hermes_db_running_count=1), 2)
+        self.assertEqual(dispatch_maximum(CAPS, board="alpha", hermes_db_running_count=2), 3)
+        self.assertEqual(dispatch_maximum(CAPS, board="alpha", hermes_db_running_count=3), 4)
+        self.assertIsNone(dispatch_maximum(CAPS, board="alpha", hermes_db_running_count=4))
+        self.assertEqual(
+            dispatch_maximum(CAPS, board="beta", hermes_db_running_count=0),
+            1,
+            "blanket board cap remains independent of the alpha override",
+        )
 
 
 if __name__ == "__main__":

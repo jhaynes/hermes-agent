@@ -8,11 +8,11 @@ This standalone Python helper gates automatic Kanban admission without changing 
 
 - Hold immediately for load1 >= logical cores, non-normal native pressure, available memory below 4 GiB, a swap-out counter increase, malformed/unreadable telemetry, first sample, counter reset, time reversal, or a sample gap. Swap-in growth alone never holds (D1 = A).
 - Recover only after 120 continuous seconds at load1 <= 0.8 cores, at least 5 GiB available, normal pressure, and no swap-out increase.
-- Enforce host admission cap 2, per-profile cap 1, and per-board `dispatch --max 1` after exact process/run reconciliation. Existing excess workers drain naturally.
-- Perform at most one side-effecting command in a recovered window: one decomposition or one dispatch. Every attempted command consumes the window.
-- Predict each board with supported `dispatch --dry-run --max 1`; classify merge-conflict > review > build; use round-robin ties; age a passed board into one admission after six windows. The accepted race is reported as `priority_miss`; policy is explicitly best-effort.
+- Read host, profile, and board blanket caps plus named overrides once from `controller.json.admission`. The sole backward-compatible defaults are 2/1/1 in `spec.py`; existing excess workers drain naturally.
+- Perform at most one mutating command in a recovered eligibility window: one decomposition or one dispatch. Read-only dry runs do not count. Every attempted mutating command consumes the window.
+- Predict each board with supported `dispatch --dry-run --max <m>` and run the one real dispatch with the same fenced `m = min(effective board cap, Hermes database running count + 1)`. Normal operation leaves one slot. Completion races may report extras, accepted only after exact task/run/worker reconciliation and post-command cap verification.
 - Persist a pending journal before command launch. Timeout, output drift, nonzero exit, launch failure, or post-command disagreement remains an operator hold across restart.
-- Refuse active behavior unless the effective default config is explicitly compatible, including `dispatch_in_gateway: false`, `max_in_progress: 2`, per-profile cap 1, orphan reconciliation on, and stale timeout 0.
+- Refuse active behavior unless the effective default config is explicitly compatible, including `dispatch_in_gateway: false`, Hermes host cap equal to the controller host cap, Hermes global profile cap equal to the largest effective controller profile cap, an explicit nonempty `dispatch_profiles` registry, orphan reconciliation on, and stale timeout 0.
 - Any null/blank notification owner on any board is an activation hold. Historical zero counts are not cached or promised.
 
 ## Repository staging layout
