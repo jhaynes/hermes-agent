@@ -78,6 +78,19 @@ Disposable copies were made from the implementation tree; each row records the d
 | weaken exact Hermes cap equality | config mismatch table | 1 | `02d78f7ba2c8bdc05c9cc799f01ed479475eb85a7f1313cd832cee0fcac290a1` |
 | change absent host/profile/board default | absent-section migration test (three independent copies) | 1 each | `97d141ca6c10977cf13d375d63740aa2d97c6a4715385f4e071bfae1c9cb028a`, `c22498d23b67507555a5391b1f8c7c0e16e8846a75be0edc42f1928b8433bae5`, `800fe169cf6af03a282818cc48170d7d762cf8f2a1e1dc2c11963e0a1d88b5fe` |
 
+
+**Review round 1 follow-up (desktop, 2026-09-24).** reviewtests (deleg_039316e0) re-ran the campaign. Mutants (h) and (x) were killed in the table above only at their helper or incidental layers: (h) is the all-boards count at the engine real-dispatch call site, and (x) is null/empty `dispatch_profiles` with NO profile overrides, which is the production template. Mutants (i) (board-at-DB-cap falls through as `--max 0`) and (k) (dry-run row with wrong assignee or ineligible profile accepted) survived. Four behaviour tests were added, and every mutant now exits nonzero in a disposable copy:
+
+| Mutant | Killer | Exit |
+|---|---|---:|
+| (h) engine real-dispatch `m` from all boards' DB-running count | `test_real_dispatch_max_uses_only_the_selected_board_database_count` | 1 |
+| (i) final-fence `dispatch_max is None` falls through as `--max 0` | `test_final_fence_database_board_cap_issues_no_command` | 1 |
+| (k1) dry-run row assignee differs from fenced inventory | `test_prediction_row_must_match_fenced_assignee_and_eligible_profiles` | 1 |
+| (k2) dry-run row profile not dispatch-eligible | same | 1 |
+| (x) null/empty `dispatch_profiles` with no profile overrides | `test_empty_profile_registry_is_refused_without_profile_overrides` | 1 |
+
+The reviewsystem low finding (the in-tree old-reader test exercises the current reader, not the installed 7771e842 binary) is recorded as a release-procedure check instead: RUNBOOK install step "old-reader check" runs the extracted previous archive's `SecureStateStore.has_pending_uncertainty` against the live journal before a binary swap. The review ran that probe live: reconciled multi-start is non-blocking, and pending/uncertain is blocking.
+
 ## Open activation/release requirements
 
 - B-003: production stale-timeout policy is expected to be incompatible until explicitly approved/changed or supported CLI parity exists.

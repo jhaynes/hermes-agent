@@ -76,6 +76,16 @@ class ConfigContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigCompatibilityError, key):
                     ControllerConfig.from_mapping(raw, admission_caps=CAPS)
 
+    def test_empty_profile_registry_is_refused_without_profile_overrides(self) -> None:
+        caps = AdmissionCaps(4, 1, (), 1, (("smithers", 4),))
+        for value in (None, []):
+            with self.subTest(value=value):
+                raw = self.valid()
+                raw["max_in_progress_per_profile"] = 1
+                raw["dispatch_profiles"] = value
+                with self.assertRaisesRegex(ConfigCompatibilityError, "dispatch_profiles must be a nonempty"):
+                    ControllerConfig.from_mapping(raw, admission_caps=caps)
+
     def test_absent_admission_defaults_reach_compatibility_gate(self) -> None:
         defaults = AdmissionCaps(2, 1, (), 1, ())
         raw = self.valid()
@@ -161,6 +171,33 @@ class CliContractTests(unittest.TestCase):
                 bad["spawned"] = spawned
                 with self.assertRaises(CommandContractError):
                     parse_dispatch_prediction(json.dumps(bad), board="team", titles={"t_1": "Review"})
+
+    def test_prediction_row_must_match_fenced_assignee_and_eligible_profiles(self) -> None:
+        payload = {
+            "reclaimed": 0, "crashed": [], "timed_out": [], "stale": [], "auto_blocked": [],
+            "promoted": 0,
+            "spawned": [{"task_id": "t_1", "assignee": "reviewscope", "workspace": None}],
+            "skipped_unassigned": [], "skipped_nonspawnable": [], "skipped_per_profile_capped": [],
+            "auto_assigned_default": [], "reaped_terminal_workers": [], "respawn_guarded": [],
+            "rate_limited": [], "skipped_locked": False, "memory_pressure": None,
+        }
+        output = json.dumps(payload)
+        titles = {"t_1": "Review"}
+        parsed = parse_dispatch_prediction(
+            output, board="team", titles=titles,
+            assignees={"t_1": "reviewscope"}, eligible_profiles=("reviewscope",),
+        )
+        self.assertEqual(parsed.assignee, "reviewscope")
+        with self.assertRaisesRegex(CommandContractError, "assignee differs"):
+            parse_dispatch_prediction(
+                output, board="team", titles=titles,
+                assignees={"t_1": "builder"}, eligible_profiles=("reviewscope", "builder"),
+            )
+        with self.assertRaisesRegex(CommandContractError, "not dispatch-eligible"):
+            parse_dispatch_prediction(
+                output, board="team", titles=titles,
+                assignees={"t_1": "reviewscope"}, eligible_profiles=("builder",),
+            )
 
     def test_prediction_rejects_malformed_unknown_or_maintenance_output(self) -> None:
         with self.assertRaises(CommandContractError):

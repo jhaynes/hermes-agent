@@ -317,6 +317,44 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(engine.tick().reason, "recovery-dwell")
             self.assertEqual(commands.calls, [("dispatch", "a", "t_1")])
 
+    def test_real_dispatch_max_uses_only_the_selected_board_database_count(self) -> None:
+        caps = AdmissionCaps(4, 2, (), 1, (("a", 4),))
+        selected = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None, 1)
+        other = BoardView("b", {}, {}, None, 2)
+        started = LiveWorker("a", "t_1", 11, 101, 1.0, "builder", "running")
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(selected, other), caps=caps),
+                snapshot(121, boards=(selected, other), caps=caps),
+                snapshot(122, boards=(selected, other), workers=(started,), caps=caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
+            commands.outcome = CommandOutcome(False, ("t_1",), (("t_1", "builder"),))
+            result = self.make_engine(root, world, commands).tick()
+            self.assertEqual(result.reason, "dispatched")
+            self.assertEqual(commands.calls, [("dispatch", "a", "t_1")])
+            self.assertEqual(commands.dispatch_maxes, [2, 2])
+
+    def test_final_fence_database_board_cap_issues_no_command(self) -> None:
+        # Live workers leave admission capacity, but Hermes's running rows fill
+        # the board: a hold, never an encoded --max 0 command.
+        caps = AdmissionCaps(2, 1, (), 1, ())
+        open_board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None, 0)
+        full_board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None, 1)
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(open_board,), caps=caps),
+                snapshot(121, boards=(full_board,), caps=caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "board-cap")
+            self.assertEqual(commands.calls, [])
+            self.assertEqual(commands.dispatch_maxes, [1])
+            self.assertFalse((Path(root) / "state" / "pending.json").exists())
+
     def test_stricter_profile_and_host_caps_are_verified_after_dispatch(self) -> None:
         profile_caps = AdmissionCaps(4, 1, (("builder", 2),), 4, ())
         board = BoardView(
