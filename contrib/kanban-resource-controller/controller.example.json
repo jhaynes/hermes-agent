@@ -2,7 +2,7 @@
   "hermes_executable": "/ABSOLUTE/PATH/TO/hermes",
   "hermes_home": "/ABSOLUTE/PATH/TO/.hermes",
   "source_root": "/ABSOLUTE/PATH/TO/hermes-agent",
-  "expected_source_commit": "ee5ee84a345204a3b1d6ef6ba1ab747e602867b9",
+  "expected_source_commit": "0e0a29ad315da6b6fd5b63e2903600af85e839e5",
   "dispatcher_lock": "/ABSOLUTE/PATH/TO/.hermes/kanban/.dispatcher.lock",
   "state_dir": "/ABSOLUTE/PATH/TO/.hermes/operations/kanban-resource-controller/state",
   "boards": {
