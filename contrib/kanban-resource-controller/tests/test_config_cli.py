@@ -54,6 +54,12 @@ class ConfigContractTests(unittest.TestCase):
                 with self.assertRaisesRegex(ConfigCompatibilityError, key):
                     ControllerConfig.from_mapping(raw)
 
+    def test_controller_telemetry_setting_is_not_accepted_in_hermes_config(self) -> None:
+        raw = self.valid()
+        raw["telemetry"] = {"linux_psi": {"some_avg10_warning": 10.0}}
+        with self.assertRaises(ConfigCompatibilityError):
+            ControllerConfig.from_mapping(raw)
+
     def test_missing_or_unknown_setting_is_refused(self) -> None:
         raw = self.valid()
         del raw["failure_limit"]

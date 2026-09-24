@@ -9,7 +9,6 @@ import time
 from typing import Sequence
 
 from .cli_adapter import CliCommands
-from .config import ControllerConfig
 from .engine import ControllerEngine
 from .host import HostSampler
 from .locking import LockContended, SingletonLock
@@ -51,15 +50,13 @@ def _world(spec: RuntimeSpec, store: SecureStateStore) -> RuntimeWorld:
         verify_source_baseline(spec.source_root, spec.expected_source_commit)
         return read_kanban_config(spec.hermes_home / "config.yaml")
 
-    # PSI thresholds are read once at process start (HostSampler is built once
-    # per run); this is a deliberate deviation from per-tick config re-reads,
-    # documented in REQUIREMENT_LEDGER section 17.
-    bootstrap_config = ControllerConfig.from_mapping(config_reader())
+    # PSI thresholds come from controller.json (RuntimeSpec), which is read once
+    # at process start; changing them requires a controller restart.
     backend_kwargs: dict[str, float] = {}
     if sys.platform.startswith("linux"):
         backend_kwargs = {
-            "some_avg10_warning": bootstrap_config.linux_psi_some_avg10_warning,
-            "full_avg10_critical": bootstrap_config.linux_psi_full_avg10_critical,
+            "some_avg10_warning": spec.linux_psi_some_avg10_warning,
+            "full_avg10_critical": spec.linux_psi_full_avg10_critical,
         }
     sampler = HostSampler(backend=select_backend(**backend_kwargs))
 
@@ -111,6 +108,41 @@ def _check(spec: RuntimeSpec, store: SecureStateStore) -> int:
     return 0
 
 
+def run_iteration(engine: ControllerEngine, world, store: SecureStateStore, *, stopping: bool) -> int | None:
+    """One supervised loop iteration. Returns an exit code only when a drained stop completes."""
+    try:
+        if stopping:
+            snapshot = world.capture()
+            if not snapshot.workers:
+                return 0
+            store.write_json("status.json", {
+                "mode": "best-effort downstream-first",
+                "reason": "draining-descendants",
+                "workers": len(snapshot.workers),
+            })
+        else:
+            engine.tick()
+    except TelemetryError as exc:
+        # Unknown gap: drop the policy baseline/dwell and the status delta baseline.
+        engine.invalidate()
+        store.write_json("status.json", {
+            "schema_version": telemetry_constants.SCHEMA_VERSION,
+            "mode": "best-effort downstream-first",
+            "reason": telemetry_constants.REASON_TELEMETRY_ERROR,
+            "error_code": exc.error_code,
+            "diagnostic": exc.diagnostic,
+            "manual_hold": _manual_hold(store),
+        })
+    except Exception as exc:
+        store.write_json("status.json", {
+            "mode": "best-effort downstream-first",
+            "reason": "persistent-operator-hold",
+            "error_type": type(exc).__name__,
+            "error": str(exc)[:1000],
+        })
+    return None
+
+
 def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
     world = _world(spec, store)
     engine = ControllerEngine(
@@ -130,35 +162,9 @@ def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
     signal.signal(signal.SIGINT, request_stop)
     with SingletonLock(spec.dispatcher_lock):
         while True:
-            try:
-                if stopping:
-                    snapshot = world.capture()
-                    if not snapshot.workers:
-                        return 0
-                    store.write_json("status.json", {
-                        "mode": "best-effort downstream-first",
-                        "reason": "draining-descendants",
-                        "workers": len(snapshot.workers),
-                    })
-                else:
-                    engine.tick()
-            except TelemetryError as exc:
-                engine.policy.invalidate()
-                store.write_json("status.json", {
-                    "schema_version": telemetry_constants.SCHEMA_VERSION,
-                    "mode": "best-effort downstream-first",
-                    "reason": telemetry_constants.REASON_TELEMETRY_ERROR,
-                    "error_code": exc.error_code,
-                    "diagnostic": exc.diagnostic,
-                    "manual_hold": _manual_hold(store),
-                })
-            except Exception as exc:
-                store.write_json("status.json", {
-                    "mode": "best-effort downstream-first",
-                    "reason": "persistent-operator-hold",
-                    "error_type": type(exc).__name__,
-                    "error": str(exc)[:1000],
-                })
+            exit_code = run_iteration(engine, world, store, stopping=stopping)
+            if exit_code is not None:
+                return exit_code
             time.sleep(spec.interval_seconds)
 
 

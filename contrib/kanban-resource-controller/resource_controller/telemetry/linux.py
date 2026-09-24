@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import os
 import re
 from typing import Callable
@@ -13,6 +14,10 @@ _MEMAVAILABLE_RE = re.compile(r"^MemAvailable:\s+(\d+)\s+kB$", re.MULTILINE)
 _FLOAT_RE = r"\d+\.\d+"
 _PSI_LINE_RE = re.compile(rf"^(some|full)\s+(.*)$")
 _PSI_TOKEN_RE = re.compile(r"([A-Za-z0-9_]+)=(\S+)")
+
+_PSI_UNSUPPORTED_ERRNOS = frozenset(
+    code for code in (getattr(errno, "EOPNOTSUPP", None), getattr(errno, "ENOTSUP", None)) if code is not None
+)
 
 VMSTAT_PATH = "/proc/vmstat"
 MEMINFO_PATH = "/proc/meminfo"
@@ -28,13 +33,13 @@ def _read_capped(path: str) -> str:
             raise TelemetryError(constants.ERROR_PSI_UNAVAILABLE, f"{path} not found") from exc
         raise TelemetryError(constants.ERROR_READ_ERROR, f"{path} not found") from exc
     except OSError as exc:
-        if psi and getattr(exc, "errno", None) == 95:  # EOPNOTSUPP
+        if psi and exc.errno in _PSI_UNSUPPORTED_ERRNOS:
             raise TelemetryError(constants.ERROR_PSI_UNAVAILABLE, f"{path} unsupported") from exc
         raise TelemetryError(constants.ERROR_READ_ERROR, f"{path} open failed: {exc.__class__.__name__}") from exc
     try:
         data = os.read(fd, constants.LINUX_READ_BYTES)
     except OSError as exc:
-        if psi and getattr(exc, "errno", None) == 95:
+        if psi and exc.errno in _PSI_UNSUPPORTED_ERRNOS:
             raise TelemetryError(constants.ERROR_PSI_UNAVAILABLE, f"{path} unsupported") from exc
         raise TelemetryError(constants.ERROR_READ_ERROR, f"{path} read failed: {exc.__class__.__name__}") from exc
     finally:

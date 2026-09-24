@@ -96,7 +96,7 @@ Historical bug: the pre-fix code called `psutil.swap_memory().sin/.sout` on Darw
   {"telemetry": {"linux_psi": {"some_avg10_warning": 10.0, "full_avg10_critical": 0.0}}}
   ```
 
-  An absent `telemetry` or `telemetry.linux_psi` section uses the defaults above — the Mac deployment's `controller.json` stays byte-identical. Values must be finite numbers in [0, 100]; unknown keys refuse like every other setting.
+  An absent `telemetry` or `telemetry.linux_psi` section uses the defaults above — the Mac deployment's `controller.json` stays byte-identical. The section belongs in the controller's own `controller.json` runtime spec (never in Hermes `config.yaml`, whose kanban mapping still refuses unknown keys). The spec is read once at process start, so a threshold change takes effect only after a controller restart (hold, bootout, bootstrap). Values must be finite numbers in [0, 100]; unknown keys refuse like every other setting.
 - **Linux without PSI** (D3, fail closed): `ENOENT`/`EOPNOTSUPP` reading `/proc/pressure/memory` raises `TelemetryError` with `error_code = "psi-unavailable"`, surfaced as `reason: telemetry-error`. Enable PSI (`psi=1` on the kernel command line, or the distro equivalent) rather than deploying with pressure disabled; there is no degraded fallback.
 - **Container caveat:** Linux `/proc/pressure/memory` reflects the cgroup/container the controller runs in, not necessarily the physical host. This package is documented and intended to run directly on the host (launchd-only on macOS today); a future Linux deployment must run on bare metal or a privileged/host-PID container to get host-wide PSI.
 

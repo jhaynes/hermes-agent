@@ -68,7 +68,7 @@ def parse_vm_stat(stdout: bytes, stderr: bytes, returncode: int) -> tuple[int, i
 
 
 def parse_pressure_level(stdout: bytes, returncode: int) -> int:
-    if returncode != 0 or len(stdout) > 64:
+    if returncode != 0 or len(stdout) > constants.DARWIN_SYSCTL_MAX_OUTPUT_BYTES:
         raise TelemetryError(constants.ERROR_PARSE_ERROR, "native memory pressure unavailable")
     try:
         return int(stdout.strip())

@@ -103,7 +103,7 @@ The predecessor implementation/verification snapshot is `4d081104d8039869ae64c74
 | Legacy unowned delivery limitation | board inventory/preflight behavior plus explicit historical-only warning in ledger, matrix, and runbook |
 | Rollback and bounded canary | lifecycle/storage behavior, template boundaries, explicit authorization phases and abort criteria in runbook |
 | Immutable package and reproducible evidence | this manifest plus external release receipt/archive hash generated from and tested at the frozen commit |
-| Cross-platform memory telemetry (REQUIREMENT_LEDGER §17) | `resource_controller/telemetry/` package, `host.py`/`policy.py`/`config.py`/`main.py`/`engine.py` updates, `tests/test_telemetry.py`, real Darwin/Linux fixtures |
+| Cross-platform memory telemetry (REQUIREMENT_LEDGER §17) | `resource_controller/telemetry/` package, `host.py`/`policy.py`/`spec.py`/`main.py`/`engine.py` updates, `tests/test_telemetry.py`, real Darwin/Linux fixtures |
 
 ## Explicit exclusions
 

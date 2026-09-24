@@ -12,6 +12,17 @@ from .storage import SecureStateStore
 from .telemetry import constants as telemetry_constants
 
 
+# Samples with these reasons start a fresh baseline; a delta against the prior
+# sample would span an unknown gap, a reset, or an untrusted sample.
+_NO_DELTA_REASONS = frozenset({
+    telemetry_constants.REASON_SWAP_BASELINE,
+    telemetry_constants.REASON_SAMPLE_GAP,
+    telemetry_constants.REASON_SWAP_RESET,
+    telemetry_constants.REASON_NONMONOTONIC_TIME,
+    telemetry_constants.REASON_UNKNOWN_TELEMETRY,
+})
+
+
 @dataclass(frozen=True)
 class BoardView:
     board: str
@@ -73,6 +84,12 @@ class ControllerEngine:
         self.priority_misses = 0
         self._previous_sample: HostSample | None = None
         self._previous_wall_time: float | None = None
+
+    def invalidate(self) -> None:
+        """Telemetry failed: forget the policy baseline/dwell and the status delta baseline."""
+        self.policy.invalidate()
+        self._previous_sample = None
+        self._previous_wall_time = None
 
     def tick(self) -> TickResult:
         if self.store.has_pending_uncertainty():
@@ -237,7 +254,7 @@ class ControllerEngine:
             interval_seconds = None
             swap_in_delta = None
             swap_out_delta = None
-            if self._previous_sample is not None:
+            if self._previous_sample is not None and reason not in _NO_DELTA_REASONS:
                 interval_seconds = sample.monotonic - self._previous_sample.monotonic
                 if sample.swap_in >= self._previous_sample.swap_in:
                     swap_in_delta = sample.swap_in - self._previous_sample.swap_in

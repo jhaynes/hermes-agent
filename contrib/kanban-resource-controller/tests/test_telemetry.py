@@ -94,9 +94,24 @@ class DarwinParserTests(unittest.TestCase):
             parse_vm_stat(bad.encode(), b"", 0)
 
     def test_oversized_output_raises(self) -> None:
-        oversized = b"x" * (constants.DARWIN_MAX_OUTPUT_BYTES + 1)
+        valid = _fixture("vm_stat_darwin_16k.txt")
+        parse_vm_stat(valid, b"", 0)  # the unpadded fixture parses
+        padded = valid + b" " * (constants.DARWIN_MAX_OUTPUT_BYTES + 1 - len(valid))
+        self.assertEqual(len(padded), constants.DARWIN_MAX_OUTPUT_BYTES + 1)
+        with self.assertRaises(TelemetryError) as ctx:
+            parse_vm_stat(padded, b"", 0)
+        self.assertIn("oversized", ctx.exception.diagnostic)
+
+    def test_oversized_stderr_raises(self) -> None:
+        with self.assertRaises(TelemetryError) as ctx:
+            parse_vm_stat(_fixture("vm_stat_darwin_16k.txt"), b"e" * (constants.DARWIN_MAX_OUTPUT_BYTES + 1), 0)
+        self.assertIn("oversized", ctx.exception.diagnostic)
+
+    def test_sysctl_output_cap_is_named_constant(self) -> None:
+        cap = constants.DARWIN_SYSCTL_MAX_OUTPUT_BYTES
+        self.assertEqual(parse_pressure_level(b" " * (cap - 1) + b"1", 0), 1)
         with self.assertRaises(TelemetryError):
-            parse_vm_stat(oversized, b"", 0)
+            parse_pressure_level(b" " * cap + b"1", 0)
 
     def test_nonzero_exit_raises(self) -> None:
         with self.assertRaises(TelemetryError):
@@ -316,6 +331,47 @@ class LinuxBackendTests(unittest.TestCase):
 
         backend = LinuxBackend(reader=reader, page_size=lambda: 4096, some_avg10_warning=5.0)
         self.assertEqual(backend.sample().pressure, "warning")
+
+    def test_real_reader_enoent_on_psi_is_psi_unavailable(self) -> None:
+        import tempfile
+        from unittest import mock
+        from resource_controller.telemetry import linux
+
+        with tempfile.TemporaryDirectory() as root:
+            missing = str(Path(root) / "pressure" / "memory")
+            with mock.patch.object(linux, "PRESSURE_MEMORY_PATH", missing):
+                with self.assertRaises(TelemetryError) as ctx:
+                    linux._read_capped(missing)
+            self.assertEqual(ctx.exception.error_code, constants.ERROR_PSI_UNAVAILABLE)
+            with self.assertRaises(TelemetryError) as ctx:
+                linux._read_capped(str(Path(root) / "vmstat"))
+            self.assertEqual(ctx.exception.error_code, constants.ERROR_READ_ERROR)
+
+    def test_real_reader_eopnotsupp_on_psi_is_psi_unavailable(self) -> None:
+        import errno
+        from unittest import mock
+        from resource_controller.telemetry import linux
+
+        def refuse(*_args, **_kwargs):
+            raise OSError(errno.EOPNOTSUPP, "Operation not supported")
+
+        with mock.patch.object(linux.os, "open", side_effect=refuse):
+            with self.assertRaises(TelemetryError) as ctx:
+                linux._read_capped(linux.PRESSURE_MEMORY_PATH)
+        self.assertEqual(ctx.exception.error_code, constants.ERROR_PSI_UNAVAILABLE)
+
+    def test_real_reader_rejects_oversized_procfs_read(self) -> None:
+        import tempfile
+        from resource_controller.telemetry import linux
+
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "vmstat"
+            path.write_bytes(b"a" * (constants.LINUX_READ_CAP_BYTES + 1))
+            with self.assertRaises(TelemetryError) as ctx:
+                linux._read_capped(str(path))
+            self.assertEqual(ctx.exception.error_code, constants.ERROR_READ_ERROR)
+            path.write_bytes(b"a" * constants.LINUX_READ_CAP_BYTES)
+            self.assertEqual(len(linux._read_capped(str(path))), constants.LINUX_READ_CAP_BYTES)
 
     def test_enoent_maps_to_psi_unavailable(self) -> None:
         def reader(path: str) -> str:

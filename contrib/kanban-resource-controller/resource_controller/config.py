@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import math
 from typing import Any, Mapping
-
-from .telemetry import constants
 
 
 class ConfigCompatibilityError(ValueError):
@@ -47,13 +44,11 @@ class ControllerConfig:
     review_dispatch: bool
     default_assignee: str | None
     dispatch_profiles: tuple[str, ...] | None
-    linux_psi_some_avg10_warning: float
-    linux_psi_full_avg10_critical: float
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ControllerConfig":
         missing = _REQUIRED_KEYS - set(raw)
-        unknown = set(raw) - _REQUIRED_KEYS - _ALLOWED_IGNORED_KEYS - {"telemetry"}
+        unknown = set(raw) - _REQUIRED_KEYS - _ALLOWED_IGNORED_KEYS
         if missing:
             raise ConfigCompatibilityError(f"missing required key: {sorted(missing)[0]}")
         if unknown:
@@ -77,15 +72,12 @@ class ControllerConfig:
             or any(not isinstance(item, str) or not item for item in profiles)
         ):
             raise ConfigCompatibilityError("dispatch_profiles must be a string list or null")
-        some_warn, full_crit = _linux_psi(raw)
         return cls(
             failure_limit=failure_limit,
             auto_decompose=auto_decompose,
             review_dispatch=review_dispatch,
             default_assignee=default_assignee,
             dispatch_profiles=None if profiles is None else tuple(profiles),
-            linux_psi_some_avg10_warning=some_warn,
-            linux_psi_full_avg10_critical=full_crit,
         )
 
 
@@ -109,39 +101,3 @@ def _bool(raw: Mapping[str, Any], key: str) -> bool:
 def _exact_bool(raw: Mapping[str, Any], key: str, expected: bool) -> None:
     if _bool(raw, key) is not expected:
         raise ConfigCompatibilityError(f"{key} must be exactly {expected}")
-
-
-def _linux_psi(raw: Mapping[str, Any]) -> tuple[float, float]:
-    telemetry = raw.get("telemetry")
-    if telemetry is None:
-        return (
-            constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING,
-            constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL,
-        )
-    if not isinstance(telemetry, dict):
-        raise ConfigCompatibilityError("telemetry must be an object")
-    unknown_top = set(telemetry) - {"linux_psi"}
-    if unknown_top:
-        raise ConfigCompatibilityError(f"unsupported telemetry setting: {sorted(unknown_top)[0]}")
-    linux_psi = telemetry.get("linux_psi")
-    if linux_psi is None:
-        return (
-            constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING,
-            constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL,
-        )
-    if not isinstance(linux_psi, dict):
-        raise ConfigCompatibilityError("telemetry.linux_psi must be an object")
-    allowed = {"some_avg10_warning", "full_avg10_critical"}
-    unknown = set(linux_psi) - allowed
-    if unknown:
-        raise ConfigCompatibilityError(f"unsupported telemetry.linux_psi setting: {sorted(unknown)[0]}")
-    some_warn = linux_psi.get("some_avg10_warning", constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING)
-    full_crit = linux_psi.get("full_avg10_critical", constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL)
-    for name, value in (("some_avg10_warning", some_warn), ("full_avg10_critical", full_crit)):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigCompatibilityError(f"telemetry.linux_psi.{name} must be a finite number")
-        if not math.isfinite(float(value)):
-            raise ConfigCompatibilityError(f"telemetry.linux_psi.{name} must be finite")
-        if not (0.0 <= float(value) <= 100.0):
-            raise ConfigCompatibilityError(f"telemetry.linux_psi.{name} must be within [0, 100]")
-    return float(some_warn), float(full_crit)

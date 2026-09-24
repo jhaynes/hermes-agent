@@ -2,11 +2,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import json
+import math
 import os
 from pathlib import Path
 import re
 import stat
 from typing import Mapping
+
+from .telemetry import constants
 
 
 class SpecError(RuntimeError):
@@ -17,6 +20,7 @@ _KEYS = {
     "hermes_executable", "hermes_home", "source_root", "expected_source_commit",
     "dispatcher_lock", "state_dir", "boards", "interval_seconds",
 }
+_OPTIONAL_KEYS = {"telemetry"}
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 
@@ -31,6 +35,8 @@ class RuntimeSpec:
     state_dir: Path
     boards: Mapping[str, Path]
     interval_seconds: int
+    linux_psi_some_avg10_warning: float = constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING
+    linux_psi_full_avg10_critical: float = constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL
 
     @classmethod
     def read(cls, path: Path) -> "RuntimeSpec":
@@ -47,7 +53,7 @@ class RuntimeSpec:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise SpecError(f"runtime spec unreadable: {exc}") from exc
-        if not isinstance(raw, dict) or set(raw) != _KEYS:
+        if not isinstance(raw, dict) or not (_KEYS <= set(raw) <= _KEYS | _OPTIONAL_KEYS):
             raise SpecError("runtime spec keys do not match the pinned contract")
         paths = {
             key: _absolute(raw[key], key)
@@ -76,6 +82,7 @@ class RuntimeSpec:
             pass
         else:
             raise SpecError("state_dir must be outside installed source")
+        some_warning, full_critical = _linux_psi(raw.get("telemetry"))
         return cls(
             paths["hermes_executable"],
             paths["hermes_home"],
@@ -85,7 +92,35 @@ class RuntimeSpec:
             paths["state_dir"],
             boards,
             interval,
+            some_warning,
+            full_critical,
         )
+
+
+def _linux_psi(telemetry: object) -> tuple[float, float]:
+    """Optional controller.json ``telemetry.linux_psi`` thresholds (D2); absent => defaults."""
+    some = constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING
+    full = constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL
+    if telemetry is None:
+        return some, full
+    if not isinstance(telemetry, dict) or set(telemetry) - {"linux_psi"}:
+        raise SpecError("telemetry must be an object with only linux_psi")
+    linux_psi = telemetry.get("linux_psi")
+    if linux_psi is None:
+        return some, full
+    allowed = {"some_avg10_warning", "full_avg10_critical"}
+    if not isinstance(linux_psi, dict) or set(linux_psi) - allowed:
+        raise SpecError("telemetry.linux_psi accepts only some_avg10_warning and full_avg10_critical")
+    values = {"some_avg10_warning": some, "full_avg10_critical": full}
+    for name in allowed & set(linux_psi):
+        value = linux_psi[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise SpecError(f"telemetry.linux_psi.{name} must be a number")
+        value = float(value)
+        if not math.isfinite(value) or not 0.0 <= value <= 100.0:
+            raise SpecError(f"telemetry.linux_psi.{name} must be finite and within [0, 100]")
+        values[name] = value
+    return values["some_avg10_warning"], values["full_avg10_critical"]
 
 
 def _absolute(value: object, key: str) -> Path:

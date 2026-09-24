@@ -259,5 +259,58 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(restarted_commands.calls, [])
 
 
+class StatusDeltaTests(unittest.TestCase):
+    def _engine(self, root: str, samples: list[HostSample]) -> ControllerEngine:
+        states = [
+            GateSnapshot("same", sample, config(), None, True, (), (), 0)
+            for sample in samples
+        ]
+        return ControllerEngine(
+            AdmissionPolicy(recovery_seconds=120, max_sample_gap=35),
+            SecureStateStore(Path(root) / "state"),
+            FakeWorld(states),
+            FakeCommands(),
+        )
+
+    def _status(self, engine: ControllerEngine) -> dict:
+        return engine.store.read_json("status.json")
+
+    def test_no_swap_delta_across_telemetry_invalidation(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine = self._engine(root, [
+                HostSample(0, 1, 10, 6 * GIB, "normal", 1000, 1000),
+                HostSample(30, 1, 10, 6 * GIB, "normal", 2000, 1500),
+                HostSample(10_000, 1, 10, 6 * GIB, "normal", 999_999, 999_999),
+            ])
+            engine.tick()
+            engine.tick()
+            self.assertEqual(self._status(engine)["swap_out_delta_bytes"], 500)
+            engine.invalidate()
+            result = engine.tick()
+            self.assertEqual(result.reason, "swap-baseline")
+            status = self._status(engine)
+            self.assertIsNone(status["swap_in_delta_bytes"])
+            self.assertIsNone(status["swap_out_delta_bytes"])
+            self.assertIsNone(status["interval_seconds"])
+
+    def test_no_swap_delta_on_baseline_gap_or_reset(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine = self._engine(root, [
+                HostSample(0, 1, 10, 6 * GIB, "normal", 1000, 1000),
+                HostSample(100, 1, 10, 6 * GIB, "normal", 5000, 5000),
+                HostSample(130, 1, 10, 6 * GIB, "normal", 10, 10),
+                HostSample(160, 1, 10, 6 * GIB, "normal", 20, 30),
+            ])
+            for expected in ("swap-baseline", "sample-gap", "swap-reset"):
+                self.assertEqual(engine.tick().reason, expected)
+                status = self._status(engine)
+                self.assertIsNone(status["swap_in_delta_bytes"], expected)
+                self.assertIsNone(status["swap_out_delta_bytes"], expected)
+            engine.tick()
+            status = self._status(engine)
+            self.assertEqual(status["swap_in_delta_bytes"], 10)
+            self.assertEqual(status["swap_out_delta_bytes"], 20)
+
+
 if __name__ == "__main__":
     unittest.main()
