@@ -34,7 +34,7 @@ class AdmissionDecision:
 class AdmissionPolicy:
     """Fail-closed resource policy with a continuous recovery dwell."""
 
-    def __init__(self, recovery_seconds: float = 120, max_sample_gap: float = 35) -> None:
+    def __init__(self, *, recovery_seconds: float, max_sample_gap: float) -> None:
         self.recovery_seconds = recovery_seconds
         self.max_sample_gap = max_sample_gap
         self._previous: HostSample | None = None

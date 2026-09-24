@@ -175,6 +175,50 @@ class TelemetrySpecTests(unittest.TestCase):
                 with self.assertRaises(SpecError):
                     RuntimeSpec.read(self._write(Path(root), extra))
 
+    def test_absent_pacing_section_uses_declared_defaults(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            spec = RuntimeSpec.read(self._write(Path(root)))
+            self.assertEqual((spec.recovery_seconds, spec.max_sample_gap_seconds), (120.0, 35.0))
+            self.assertEqual(spec.interval_seconds, 30)
+
+    def test_pacing_and_interval_are_read_from_controller_json(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            spec = RuntimeSpec.read(self._write(Path(root), {
+                "interval_seconds": 10,
+                "pacing": {"recovery_seconds": 5, "max_sample_gap_seconds": 25.5},
+            }))
+            self.assertEqual(spec.interval_seconds, 10)
+            self.assertEqual(spec.recovery_seconds, 5.0)
+            self.assertEqual(spec.max_sample_gap_seconds, 25.5)
+            zero = RuntimeSpec.read(self._write(Path(root), {
+                "interval_seconds": 10,
+                "pacing": {"recovery_seconds": 0, "max_sample_gap_seconds": 11},
+            }))
+            self.assertEqual(zero.recovery_seconds, 0.0)
+
+    def test_invalid_pacing_or_interval_refuses(self) -> None:
+        bad = [
+            {"interval_seconds": 0},
+            {"interval_seconds": 301},
+            {"interval_seconds": True},
+            {"interval_seconds": 10.0},
+            {"pacing": []},
+            {"pacing": {"recovery_seconds": 5}},
+            {"pacing": {"recovery_seconds": 5, "max_sample_gap_seconds": 45, "typo": 1}},
+            {"pacing": {"recovery_seconds": -1, "max_sample_gap_seconds": 45}},
+            {"pacing": {"recovery_seconds": True, "max_sample_gap_seconds": 45}},
+            {"pacing": {"recovery_seconds": "5", "max_sample_gap_seconds": 45}},
+            {"pacing": {"recovery_seconds": 3601, "max_sample_gap_seconds": 45}},
+            {"pacing": {"recovery_seconds": float("nan"), "max_sample_gap_seconds": 45}},
+            # the gap must exceed the loop interval, or every sample would be a gap
+            {"pacing": {"recovery_seconds": 5, "max_sample_gap_seconds": 30}},
+            {"interval_seconds": 40},  # default 35 s gap would not exceed a 40 s interval
+        ]
+        for extra in bad:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as root:
+                with self.assertRaises(SpecError):
+                    RuntimeSpec.read(self._write(Path(root), extra))
+
 
 if __name__ == "__main__":
     unittest.main()

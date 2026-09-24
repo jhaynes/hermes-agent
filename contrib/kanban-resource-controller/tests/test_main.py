@@ -11,7 +11,7 @@ from unittest import mock
 
 from resource_controller.config import ConfigCompatibilityError
 from resource_controller.engine import ControllerEngine, GateSnapshot
-from resource_controller.main import _check, build_parser, run_iteration, set_manual_hold
+from resource_controller.main import _check, admission_policy, build_parser, log_transition, run_iteration, set_manual_hold
 from resource_controller.inventory import LiveWorker
 from resource_controller.policy import AdmissionPolicy, HostSample
 from resource_controller.storage import SecureStateStore
@@ -120,7 +120,7 @@ class CheckOutputTests(unittest.TestCase):
             "fingerprint", _sample(1), config(caps=caps), None, False,
             workers, (board,), 0,
         )
-        spec = SimpleNamespace(admission_caps=caps, hermes_home=Path("/unused"))
+        spec = SimpleNamespace(admission_caps=caps, hermes_home=Path("/unused"), interval_seconds=10, recovery_seconds=5.0, max_sample_gap_seconds=25.0)
         output = io.StringIO()
         with mock.patch("resource_controller.main._world", return_value=SimpleNamespace(capture=lambda: state)), redirect_stdout(output):
             self.assertEqual(_check(spec, mock.Mock()), 0)
@@ -130,10 +130,13 @@ class CheckOutputTests(unittest.TestCase):
         self.assertEqual(payload["boards"]["smithers"]["hermes_db_running_count"], 1)
         self.assertEqual(payload["boards"]["smithers"]["controller_reconciled_live_count"], 2)
         self.assertEqual(payload["admission"]["cap_violation"]["name"], "builder")
+        self.assertEqual(payload["pacing"], {
+            "interval_seconds": 10, "recovery_seconds": 5.0, "max_sample_gap_seconds": 25.0,
+        })
 
     def test_check_makes_hermes_cap_mismatch_obvious(self) -> None:
         caps = AdmissionCaps(4, 1, (), 1, ())
-        spec = SimpleNamespace(admission_caps=caps, hermes_home=Path("/unused"))
+        spec = SimpleNamespace(admission_caps=caps, hermes_home=Path("/unused"), interval_seconds=10, recovery_seconds=5.0, max_sample_gap_seconds=25.0)
         failing = SimpleNamespace(capture=mock.Mock(side_effect=ConfigCompatibilityError("max_in_progress must be exactly 4")))
         output = io.StringIO()
         with (
@@ -148,6 +151,108 @@ class CheckOutputTests(unittest.TestCase):
         self.assertFalse(payload["compatible"])
         self.assertEqual(payload["expected_hermes"]["kanban.max_in_progress"], 4)
         self.assertEqual(payload["observed_hermes"]["kanban.max_in_progress"], 2)
+
+
+class PacingWiringTests(unittest.TestCase):
+    def test_runtime_policy_takes_pacing_from_the_spec(self) -> None:
+        spec = SimpleNamespace(recovery_seconds=0.0, max_sample_gap_seconds=25.0)
+        policy = admission_policy(spec)
+        self.assertEqual((policy.recovery_seconds, policy.max_sample_gap), (0.0, 25.0))
+        self.assertEqual(policy.observe(_sample(0)).reason, "swap-baseline")
+        self.assertTrue(policy.observe(_sample(10)).eligible, "zero recovery admits on the next healthy sample")
+        policy.command_consumed(10)
+        self.assertTrue(policy.observe(_sample(20)).eligible, "a started command costs no dwell at recovery 0")
+        self.assertEqual(policy.observe(_sample(50)).reason, "sample-gap", "30 s > configured 25 s gap")
+
+    def test_short_recovery_needs_one_clean_sample_after_a_bad_one(self) -> None:
+        policy = admission_policy(SimpleNamespace(recovery_seconds=5.0, max_sample_gap_seconds=25.0))
+        policy.observe(_sample(0))
+        self.assertTrue(policy.observe(_sample(10)).eligible)
+        warning = HostSample(20, 1, 10, 6 * GIB, "warning", 100, 100)
+        self.assertEqual(policy.observe(warning).reason, "pressure")
+        self.assertEqual(policy.observe(_sample(30)).reason, "recovery-dwell")
+        self.assertTrue(policy.observe(_sample(40)).eligible)
+
+
+class TransitionLogTests(unittest.TestCase):
+    def test_logs_starts_and_reason_changes_only(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            store = SecureStateStore(Path(root) / "state")
+            out = io.StringIO()
+            last = None
+            sequence = [
+                {"reason": "recovery-dwell", "actual_task_ids": []},
+                {"reason": "recovery-dwell", "actual_task_ids": []},
+                {"reason": "dispatched", "actual_task_ids": ["t_a", "t_b"], "extra_starts": 1},
+                {"reason": "pressure", "actual_task_ids": [], "observed_blockers": ["pressure"], "pressure": "warning"},
+                {"reason": "pressure", "actual_task_ids": [], "observed_blockers": ["pressure"], "pressure": "warning"},
+                {"reason": "eligible", "actual_task_ids": []},
+            ]
+            for status in sequence:
+                store.write_json("status.json", status)
+                last = log_transition(store, last, stream=out)
+            lines = [line.split(" ", 1)[1] for line in out.getvalue().splitlines()]
+            self.assertEqual(lines, [
+                "reason=recovery-dwell",
+                "reason=dispatched started=t_a,t_b extra_starts=1",
+                "reason=pressure blockers=pressure pressure=warning",
+                "reason=eligible",
+            ])
+
+    def test_unreadable_status_is_logged_not_raised(self) -> None:
+        store = mock.Mock()
+        store.read_json.side_effect = OSError("gone")
+        out = io.StringIO()
+        self.assertEqual(log_transition(store, ("x", (), ()), stream=out), ("x", (), ()))
+        self.assertIn("status-unreadable OSError", out.getvalue())
+
+
+class RunLoopWiringTests(unittest.TestCase):
+    def test_run_loop_uses_spec_pacing_and_logs_start_transitions_and_stop(self) -> None:
+        from resource_controller import main as main_module
+
+        caps = AdmissionCaps(8, 1, (), 2, ())
+        spec = SimpleNamespace(
+            interval_seconds=7, recovery_seconds=3.0, max_sample_gap_seconds=20.0,
+            admission_caps=caps, dispatcher_lock=Path("/unused/lock"),
+        )
+        with tempfile.TemporaryDirectory() as root:
+            store = SecureStateStore(Path(root) / "state")
+            statuses = iter([
+                ({"reason": "recovery-dwell", "actual_task_ids": []}, None),
+                ({"reason": "dispatched", "actual_task_ids": ["t_x"]}, None),
+                ({"reason": "recovery-dwell", "actual_task_ids": []}, 0),
+            ])
+            seen = {}
+
+            def fake_iteration(engine, world, store_, *, stopping):
+                seen["policy"] = engine.policy
+                status, code = next(statuses)
+                store_.write_json("status.json", status)
+                return code
+
+            sleeps = []
+            out = io.StringIO()
+            with (
+                mock.patch.object(main_module, "_world", return_value=mock.Mock()),
+                mock.patch.object(main_module, "_commands", return_value=mock.Mock()),
+                mock.patch.object(main_module, "SingletonLock", return_value=mock.MagicMock()),
+                mock.patch.object(main_module, "run_iteration", side_effect=fake_iteration),
+                mock.patch.object(main_module.signal, "signal"),
+                mock.patch.object(main_module.time, "sleep", side_effect=sleeps.append),
+                redirect_stdout(out),
+            ):
+                self.assertEqual(main_module._run(spec, store), 0)
+        self.assertEqual(sleeps, [7, 7])
+        self.assertEqual((seen["policy"].recovery_seconds, seen["policy"].max_sample_gap), (3.0, 20.0))
+        lines = [line.split(" ", 1)[1] for line in out.getvalue().splitlines()]
+        self.assertEqual(lines, [
+            "started interval=7s recovery=3s max_sample_gap=20s host_cap=8",
+            "reason=recovery-dwell",
+            "reason=dispatched started=t_x",
+            "reason=recovery-dwell",
+            "stopped exit=0",
+        ])
 
 
 class MainSurfaceTests(unittest.TestCase):

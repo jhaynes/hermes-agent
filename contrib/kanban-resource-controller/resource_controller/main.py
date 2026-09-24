@@ -123,6 +123,11 @@ def _check(spec: RuntimeSpec, store: SecureStateStore) -> int:
             }
             for board in snapshot.boards
         },
+        "pacing": {
+            "interval_seconds": spec.interval_seconds,
+            "recovery_seconds": spec.recovery_seconds,
+            "max_sample_gap_seconds": spec.max_sample_gap_seconds,
+        },
         "admission": {
             "host_cap": snapshot.config.admission_caps.host_cap,
             "profile_cap": snapshot.config.admission_caps.profile_cap,
@@ -201,10 +206,18 @@ def run_iteration(engine: ControllerEngine, world, store: SecureStateStore, *, s
     return None
 
 
+def admission_policy(spec: RuntimeSpec) -> AdmissionPolicy:
+    """The only place pacing reaches the policy: values come from controller.json."""
+    return AdmissionPolicy(
+        recovery_seconds=spec.recovery_seconds,
+        max_sample_gap=spec.max_sample_gap_seconds,
+    )
+
+
 def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
     world = _world(spec, store)
     engine = ControllerEngine(
-        AdmissionPolicy(recovery_seconds=120, max_sample_gap=35),
+        admission_policy(spec),
         store,
         world,
         _commands(spec, world),
@@ -219,11 +232,47 @@ def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
     with SingletonLock(spec.dispatcher_lock):
+        log_line(f"started interval={spec.interval_seconds}s recovery={spec.recovery_seconds:g}s "
+                 f"max_sample_gap={spec.max_sample_gap_seconds:g}s host_cap={spec.admission_caps.host_cap}")
+        last: tuple | None = None
         while True:
             exit_code = run_iteration(engine, world, store, stopping=stopping)
+            last = log_transition(store, last)
             if exit_code is not None:
+                log_line(f"stopped exit={exit_code}")
                 return exit_code
             time.sleep(spec.interval_seconds)
+
+
+def log_line(message: str, *, stream=None) -> None:
+    """One timestamped line to stdout (launchd routes it to logs/controller.log)."""
+    out = sys.stdout if stream is None else stream
+    out.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S%z')} {message}\n")
+    out.flush()
+
+
+def log_transition(store: SecureStateStore, last: tuple | None, *, stream=None) -> tuple | None:
+    """Log every start and every change of blocking reason; stay quiet while unchanged."""
+    try:
+        status = store.read_json("status.json") or {}
+    except Exception as exc:  # logging must never stop the loop
+        log_line(f"status-unreadable {type(exc).__name__}", stream=stream)
+        return last
+    started = tuple(status.get("actual_task_ids") or ())
+    key = (status.get("reason"), started, tuple(status.get("observed_blockers") or ()))
+    if key != last:
+        parts = [f"reason={key[0]}"]
+        if started:
+            parts.append("started=" + ",".join(started))
+            if status.get("extra_starts"):
+                parts.append(f"extra_starts={status['extra_starts']}")
+        if key[2]:
+            parts.append("blockers=" + ",".join(key[2]))
+        for field in ("pressure", "error_code", "error_type"):
+            if status.get(field) not in (None, "normal"):
+                parts.append(f"{field}={status[field]}")
+        log_line(" ".join(parts), stream=stream)
+    return key
 
 
 def main(argv: Sequence[str] | None = None) -> int:

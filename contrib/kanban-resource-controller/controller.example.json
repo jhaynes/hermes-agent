@@ -18,5 +18,9 @@
       "smithers": 4
     }
   },
-  "interval_seconds": 30
+  "interval_seconds": 10,
+  "pacing": {
+    "recovery_seconds": 5,
+    "max_sample_gap_seconds": 25
+  }
 }

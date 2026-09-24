@@ -89,13 +89,27 @@ Use this exact authorized sequence: **hold → stop → edit → check → resta
    Do not restart or resume until `compatible` is true and the output shows effective host/profile/board caps, both `hermes_db_running_count` and `controller_reconciled_live_count`, matching expected/observed Hermes values, and no offending profile/board/count.
 4. Restart held, repeat `check`, observe a fresh full recovery dwell, then `resume --reason "admission caps verified"`. Never live-edit a running controller: `RuntimeSpec` is read once at process start.
 
+## Change the pacing
+
+Loop pacing lives in `controller.json` next to the caps:
+
+- `interval_seconds` (integer 1–300): seconds between samples/ticks. Each tick costs about one second of dry runs per board.
+- `pacing.recovery_seconds` (0–3600): continuous healthy time required after any unhealthy sample or any started command before the next start. `0` or anything at or below `interval_seconds` means "start again on the next healthy tick".
+- `pacing.max_sample_gap_seconds` (0–3600, must exceed `interval_seconds`): a longer gap between samples (sleep, stall) is treated as a discontinuity and restarts recovery.
+
+An omitted `pacing` section uses the declared defaults in `spec.py` (120 s recovery, 35 s gap); the defaults are declared only there. `check` prints the effective `pacing`. Changing pacing uses the same **hold → stop → edit → check → restart → resume** sequence as the caps (the spec is read once at start). No Hermes key needs to match.
+
+Resource guards are unchanged by pacing: pressure, swap-out growth, load, and memory thresholds still block each tick. load1 is a one-minute average and lags new workers, so a short recovery leans on pressure/swap-out/available-memory to stop a ramp.
+
+The service logs one line per start and per change of blocking reason to `logs/controller.log` (quiet while unchanged), plus a start banner with the effective pacing and host cap.
+
 ## Admission policy and normal operation
 
 The loop performs no LLM inference. Existing automatic decomposition may use its already configured auxiliary model when enabled.
 
-Every 30 seconds, the helper samples load1, logical cores, available memory, native pressure, and cumulative swap-in/swap-out bytes via a per-OS telemetry backend (see "Cross-platform telemetry (schema 2)" below). It holds immediately when load1 is at least the core count, pressure is not normal, memory is below 4 GiB, the swap-out counter increases, or any sample is missing/malformed/non-finite/a telemetry read failure. Swap-in growth alone never holds or resets admission (D1 = A, recorded amendment; starved on this Mac under strict swap-in gating, since swap-ins were nonzero in 9 of 10 idle samples). First sample, counter reset/decrease, monotonic-time reversal, restart, or a long sample gap resets recovery.
+Every `interval_seconds` (see "Change the pacing"), the helper samples load1, logical cores, available memory, native pressure, and cumulative swap-in/swap-out bytes via a per-OS telemetry backend (see "Cross-platform telemetry (schema 2)" below). It holds immediately when load1 is at least the core count, pressure is not normal, memory is below 4 GiB, the swap-out counter increases, or any sample is missing/malformed/non-finite/a telemetry read failure. Swap-in growth alone never holds or resets admission (D1 = A, recorded amendment; starved on this Mac under strict swap-in gating, since swap-ins were nonzero in 9 of 10 idle samples). First sample, counter reset/decrease, monotonic-time reversal, restart, or a long sample gap resets recovery.
 
-Admission becomes eligible only after 120 uninterrupted seconds with load1 no greater than 0.8 times cores, at least 5 GiB available, normal pressure, and no swap-out increase. The exact 4 GiB boundary leaves the helper held until the 5 GiB recovery threshold is reached. Every attempted side-effecting command consumes the window and requires a new full recovery dwell.
+Admission becomes eligible only after `pacing.recovery_seconds` uninterrupted seconds with load1 no greater than 0.8 times cores, at least 5 GiB available, normal pressure, and no swap-out increase. The exact 4 GiB boundary leaves the helper held until the 5 GiB recovery threshold is reached. Every attempted side-effecting command consumes the window and requires a new full recovery dwell. With a small `recovery_seconds` (at most `interval_seconds`), that means one start per loop tick whenever the host is healthy.
 
 Before and immediately before a command, reconcile exact process/run identities and apply the effective controller host/profile/board caps. Existing excess workers are never killed and drain naturally. Hermes preventively bounds a race by its host cap, global profile cap, and the selected board's `m`; a stricter controller-only override is verified after the command, not claimed as preventively enforced. A violation is persistent uncertainty: keep workers running, kill nothing, and stop admission for operator disposition.
 
@@ -201,7 +215,7 @@ Use a temporary isolated HOME/HERMES_HOME, synthetic board database, harmless fi
 
 1. incompatible config and second lock owner refuse safely;
 2. pressure, ESTOP, manual hold, each capacity cap, unowned subscription, and identity ambiguity produce zero starts;
-3. first sample plus the complete 120-second recovery interval is required;
+3. first sample plus the complete configured `pacing.recovery_seconds` interval is required;
 4. one eligibility window produces at most one mutating command (read-only dry runs excluded);
 5. computed selected-board `m`, exact task/run/worker identity, decomposition-by-explicit-id, priority selection, aging, and `priority_miss` behavior match the requirement matrix;
 6. timeout sends no signal, tracks/drains the finite child, and persists uncertainty;

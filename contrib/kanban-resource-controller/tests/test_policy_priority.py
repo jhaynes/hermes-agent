@@ -4,6 +4,7 @@ import math
 import unittest
 
 from resource_controller.policy import AdmissionPolicy, HostSample
+from resource_controller.spec import DEFAULT_MAX_SAMPLE_GAP_SECONDS, DEFAULT_RECOVERY_SECONDS
 from resource_controller.priority import PredictedPick, Stage, classify_stage, select_pick
 
 GIB = 1024**3
@@ -44,7 +45,7 @@ class AdmissionPolicyTests(unittest.TestCase):
         ]
         for current, reason in cases:
             with self.subTest(reason=reason, current=current):
-                policy = AdmissionPolicy()
+                policy = AdmissionPolicy(recovery_seconds=DEFAULT_RECOVERY_SECONDS, max_sample_gap=DEFAULT_MAX_SAMPLE_GAP_SECONDS)
                 policy.observe(sample(0))
                 self.assertEqual(policy.observe(current).reason, reason)
 
@@ -72,11 +73,11 @@ class AdmissionPolicyTests(unittest.TestCase):
         ]
         for current in invalid:
             with self.subTest(current=current):
-                policy = AdmissionPolicy()
+                policy = AdmissionPolicy(recovery_seconds=DEFAULT_RECOVERY_SECONDS, max_sample_gap=DEFAULT_MAX_SAMPLE_GAP_SECONDS)
                 policy.observe(sample(0))
                 self.assertEqual(policy.observe(current).reason, "unknown-telemetry")
 
-        policy = AdmissionPolicy()
+        policy = AdmissionPolicy(recovery_seconds=DEFAULT_RECOVERY_SECONDS, max_sample_gap=DEFAULT_MAX_SAMPLE_GAP_SECONDS)
         policy.observe(sample(0, swap_in=100))
         self.assertEqual(policy.observe(sample(30, swap_in=99)).reason, "swap-reset")
         self.assertEqual(policy.observe(sample(20, swap_in=99)).reason, "nonmonotonic-time")

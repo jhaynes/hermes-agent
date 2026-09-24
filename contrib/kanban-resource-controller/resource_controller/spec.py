@@ -20,13 +20,17 @@ _KEYS = {
     "hermes_executable", "hermes_home", "source_root", "expected_source_commit",
     "dispatcher_lock", "state_dir", "boards", "interval_seconds",
 }
-_OPTIONAL_KEYS = {"telemetry", "admission"}
+_OPTIONAL_KEYS = {"telemetry", "admission", "pacing"}
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _ADMISSION_KEYS = {
     "host_cap", "profile_cap", "profile_overrides", "board_cap", "board_overrides",
 }
 DEFAULT_HOST_CAP, DEFAULT_PROFILE_CAP, DEFAULT_BOARD_CAP = 2, 1, 1
+# Pacing defaults apply only when controller.json has no ``pacing`` section.
+DEFAULT_RECOVERY_SECONDS, DEFAULT_MAX_SAMPLE_GAP_SECONDS = 120.0, 35.0
+_PACING_KEYS = {"recovery_seconds", "max_sample_gap_seconds"}
+MAX_INTERVAL_SECONDS = 300
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,8 @@ class RuntimeSpec:
     admission_caps: AdmissionCaps
     linux_psi_some_avg10_warning: float = constants.DEFAULT_LINUX_PSI_SOME_AVG10_WARNING
     linux_psi_full_avg10_critical: float = constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL
+    recovery_seconds: float = DEFAULT_RECOVERY_SECONDS
+    max_sample_gap_seconds: float = DEFAULT_MAX_SAMPLE_GAP_SECONDS
 
     @classmethod
     def read(cls, path: Path) -> "RuntimeSpec":
@@ -90,8 +96,11 @@ class RuntimeSpec:
         if not isinstance(commit, str) or not _SHA.fullmatch(commit):
             raise SpecError("expected_source_commit must be a 40-character lowercase SHA")
         interval = raw["interval_seconds"]
-        if not isinstance(interval, int) or isinstance(interval, bool) or interval != 30:
-            raise SpecError("interval_seconds must be exactly 30")
+        if (
+            not isinstance(interval, int) or isinstance(interval, bool)
+            or not 1 <= interval <= MAX_INTERVAL_SECONDS
+        ):
+            raise SpecError(f"interval_seconds must be an integer in [1, {MAX_INTERVAL_SECONDS}]")
         boards_raw = raw["boards"]
         if not isinstance(boards_raw, dict) or not boards_raw:
             raise SpecError("boards must be a nonempty object")
@@ -110,6 +119,7 @@ class RuntimeSpec:
             raw.get("admission"), boards, present="admission" in raw,
         )
         some_warning, full_critical = _linux_psi(raw.get("telemetry"))
+        recovery, sample_gap = _pacing(raw.get("pacing"), interval, present="pacing" in raw)
         return cls(
             paths["hermes_executable"],
             paths["hermes_home"],
@@ -122,6 +132,8 @@ class RuntimeSpec:
             admission_caps,
             some_warning,
             full_critical,
+            recovery,
+            sample_gap,
         )
 
 
@@ -165,6 +177,35 @@ def _override_map(value: object, key: str) -> tuple[tuple[str, int], ...]:
             raise SpecError(f"admission.{key} name is invalid")
         parsed.append((name, _positive_int(cap, f"admission.{key}.{name}")))
     return tuple(sorted(parsed))
+
+
+def _pacing(pacing: object, interval: int, *, present: bool) -> tuple[float, float]:
+    """Optional controller.json ``pacing``; absent => the declared defaults above.
+
+    ``recovery_seconds`` is the continuous healthy dwell required after any
+    unhealthy sample or started command before the next start (0 disables it).
+    ``max_sample_gap_seconds`` is the largest gap between samples that still
+    counts as continuous; it must exceed ``interval_seconds``.
+    """
+    if not present:
+        recovery, gap = DEFAULT_RECOVERY_SECONDS, DEFAULT_MAX_SAMPLE_GAP_SECONDS
+    else:
+        if not isinstance(pacing, dict) or set(pacing) != _PACING_KEYS:
+            raise SpecError("pacing keys must be exactly recovery_seconds and max_sample_gap_seconds")
+        recovery = _nonnegative_number(pacing["recovery_seconds"], "pacing.recovery_seconds")
+        gap = _nonnegative_number(pacing["max_sample_gap_seconds"], "pacing.max_sample_gap_seconds")
+    if gap <= interval:
+        raise SpecError("pacing.max_sample_gap_seconds must exceed interval_seconds")
+    return recovery, gap
+
+
+def _nonnegative_number(value: object, key: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise SpecError(f"{key} must be a number")
+    value = float(value)
+    if not math.isfinite(value) or not 0.0 <= value <= 3600.0:
+        raise SpecError(f"{key} must be finite and within [0, 3600]")
+    return value
 
 
 def _linux_psi(telemetry: object) -> tuple[float, float]:

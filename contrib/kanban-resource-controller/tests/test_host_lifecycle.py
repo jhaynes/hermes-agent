@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from resource_controller.host import HostSampler, TelemetryError
+from resource_controller.spec import DEFAULT_MAX_SAMPLE_GAP_SECONDS, DEFAULT_RECOVERY_SECONDS
 from resource_controller.lifecycle import LifecycleGuard, LifecycleHold
 from resource_controller.policy import AdmissionPolicy
 from resource_controller.telemetry import MemoryHealth
@@ -68,7 +69,7 @@ class HostSamplerTests(unittest.TestCase):
 
 class LifecycleTests(unittest.TestCase):
     def test_resume_only_clears_own_hold_and_resets_dwell(self) -> None:
-        policy = AdmissionPolicy()
+        policy = AdmissionPolicy(recovery_seconds=DEFAULT_RECOVERY_SECONDS, max_sample_gap=DEFAULT_MAX_SAMPLE_GAP_SECONDS)
         guard = LifecycleGuard(policy)
         guard.hold("operator")
         self.assertTrue(guard.manual_hold)
@@ -77,7 +78,7 @@ class LifecycleTests(unittest.TestCase):
         self.assertIsNone(guard.estop_action)
 
     def test_stop_refuses_commands_workers_and_unknown_descendants(self) -> None:
-        policy = AdmissionPolicy()
+        policy = AdmissionPolicy(recovery_seconds=DEFAULT_RECOVERY_SECONDS, max_sample_gap=DEFAULT_MAX_SAMPLE_GAP_SECONDS)
         guard = LifecycleGuard(policy)
         cases = [
             {"command_running": True, "workers": 0, "descendants_known": True},
