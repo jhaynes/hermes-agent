@@ -1000,9 +1000,10 @@ class ClientLifecycleMixin:
             self._try_refresh_anthropic_client_credentials()
         # Strips Responses-only kwargs that leak in under an api_mode-flip race.
         from agent.anthropic_adapter import create_anthropic_message
+        from hermes_cli.kanban_review_transport import guard_client
         # on_response: rate-limit + credits state live in response headers, which the parsed Message drops.
         return create_anthropic_message(
-            client or self._anthropic_client, api_kwargs, log_prefix=getattr(self, "log_prefix", ""),
+            guard_client(self, client or self._anthropic_client), api_kwargs, log_prefix=getattr(self, "log_prefix", ""),
             prefer_stream=not bool(getattr(self, "_disable_streaming", False)),
             on_response=self._capture_anthropic_response_headers,
         )

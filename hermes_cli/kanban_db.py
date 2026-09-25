@@ -3405,7 +3405,8 @@ def request_review(
     staged_copies: list[Path] = []
     try:
         with write_txn(conn):
-            from hermes_cli.kanban_review_state import handoff_allowed
+            from hermes_cli.kanban_review_state import handoff_allowed, redact_completion
+            summary, _, metadata = redact_completion(conn, task_id, summary, None, metadata)
             if not handoff_allowed(conn, task_id, expected_run_id, metadata):
                 return _ret(False, 'managed review requires a current preflight/repair receipt')
             if not _parents_satisfied(conn, task_id):

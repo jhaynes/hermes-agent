@@ -81,8 +81,16 @@ def test_cohort_requires_scope_and_only_allows_bounded_repair(tmp_path, monkeypa
         repair = kb.claim_task(conn, owner)
         assert repair is not None, 'Valid rejection must hand one repair back to the original builder'
         assert repair.assignee == 'builder'
+        repair_receipt = {'bounded_review': {'target_sha': 'd'*40}}
+        for oversized in ({'summary': 'x'*33000, 'metadata': repair_receipt},
+                          {'metadata': {**repair_receipt, 'detail': 'x'*33000}}):
+            ok, reason = kb.request_review(conn, owner, expected_run_id=repair.current_run_id,
+                                           with_reason=True, **oversized)
+            assert not ok and reason == 'managed review requires a current preflight/repair receipt'
+            assert state.get_attempt(conn, owner)['state'] == 'repair'
+            assert kb.get_task(conn, owner).current_run_id == repair.current_run_id
         assert kb.request_review(conn, owner, expected_run_id=repair.current_run_id,
-                                 metadata={'bounded_review':{'target_sha':'d'*40}})
+                                 metadata=repair_receipt)
         updated = state.get_attempt(conn, owner)
         assert updated['state'] == 'preflight'
         assert updated['target_sha'] == 'd'*40
