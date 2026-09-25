@@ -51,7 +51,8 @@ class StuckAlertTracker:
 
         if state["alert_attempted_at"] is not None:
             return
-        elapsed = max(0.0, float(now) - float(state["started_at"]))
+        # started_at is never in the future here (reset above), so elapsed >= 0.
+        elapsed = float(now) - float(state["started_at"])
         if elapsed < threshold:
             return
 

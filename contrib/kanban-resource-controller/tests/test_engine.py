@@ -442,6 +442,44 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(engine.tick().reason, "uncertain-outcome")
             self.assertTrue(engine.store.has_pending_uncertainty())
 
+    def test_claim_outside_fenced_candidate_set_is_uncertain(self) -> None:
+        board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
+        cases = {
+            "unknown-task": (("t_9", "builder"), LiveWorker("a", "t_9", 9, 99, 9.0, "builder", "running")),
+            "wrong-profile": (("t_1", "reviewer"), LiveWorker("a", "t_1", 9, 99, 9.0, "reviewer", "running")),
+        }
+        for name, (claim, worker) in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as root:
+                world = FakeWorld([
+                    snapshot(120, boards=(board,)),
+                    snapshot(121, boards=(board,)),
+                    snapshot(122, boards=(board,), workers=(worker,)),
+                ])
+                commands = FakeCommands()
+                commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
+                commands.outcome = CommandOutcome(False, (claim[0],), (claim,))
+                engine = self.make_engine(root, world, commands)
+                self.assertEqual(engine.tick().reason, "uncertain-outcome")
+                self.assertIn("fenced candidate set", engine.store.read_json("status.json")["error"])
+                self.assertTrue(engine.store.has_pending_uncertainty())
+
+    def test_configuration_change_across_dispatch_is_uncertain(self) -> None:
+        board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
+        started = LiveWorker("a", "t_1", 7, 42, 1.0, "builder", "running")
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, boards=(board,)),
+                snapshot(121, boards=(board,)),
+                snapshot(122, boards=(board,), workers=(started,), auto_decompose=True),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
+            commands.outcome = CommandOutcome(False, ("t_1",), (("t_1", "builder"),))
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "uncertain-outcome")
+            self.assertIn("configuration changed after dispatch", engine.store.read_json("status.json")["error"])
+            self.assertTrue(engine.store.has_pending_uncertainty())
+
     def test_no_eligible_prediction_advances_round_robin_pointer(self) -> None:
         boards = (
             BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None),

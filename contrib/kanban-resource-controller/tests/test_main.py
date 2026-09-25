@@ -359,6 +359,36 @@ class RunLoopWiringTests(unittest.TestCase):
             notify.assert_called_once()
             self.assertEqual(notify.call_args.args[1], 11.0)
 
+    def test_wired_stuck_alert_leaves_hold_pending_and_status_untouched(self) -> None:
+        from resource_controller.alerting import StuckAlertTracker
+        from resource_controller import main as main_module
+
+        with tempfile.TemporaryDirectory() as root:
+            store = SecureStateStore(Path(root) / "state")
+            store.write_json("status.json", {
+                "reason": "uncertain-outcome", "error_type": "IdentityHold", "error": "stuck",
+            })
+            store.write_json("pending.json", {"outcome": "uncertain-outcome", "task_id": "t_1"})
+            main_module.set_manual_hold(store, True, "operator")
+            names = ("status.json", "pending.json", "manual-hold.json")
+            before = {name: (store.root / name).read_bytes() for name in names}
+            tracker = StuckAlertTracker(store)
+            spec = SimpleNamespace(stuck_alert_after_seconds=0.0, notify_timeout_seconds=5.0)
+            out = io.StringIO()
+            with (
+                mock.patch.object(main_module.time, "time", return_value=100.0),
+                mock.patch.object(main_module.sys, "platform", "darwin"),
+                mock.patch.object(main_module.subprocess, "run") as run,
+                redirect_stdout(out),
+            ):
+                run.return_value = SimpleNamespace(returncode=0)
+                _observe_alert(tracker, store, spec)
+            run.assert_called_once()
+            self.assertIn("stuck-alert", out.getvalue())
+            after = {name: (store.root / name).read_bytes() for name in names}
+            self.assertEqual(after, before)
+            self.assertTrue(store.has_pending_uncertainty())
+
     def test_notification_timeout_logs_fallback_once(self) -> None:
         from resource_controller import main as main_module
 
