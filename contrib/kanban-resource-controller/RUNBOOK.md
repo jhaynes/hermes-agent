@@ -101,7 +101,7 @@ An omitted `pacing` section uses the declared defaults in `spec.py` (120 s recov
 
 Resource guards are unchanged by pacing: pressure, swap-out growth, load, and memory thresholds still block each tick. load1 is a one-minute average and lags new workers, so a short recovery leans on pressure/swap-out/available-memory to stop a ramp.
 
-The service logs one line per start and per change of blocking reason to `logs/controller.log` (quiet while unchanged), plus a start banner with the effective pacing and host cap.
+The service logs one line per start and per change of blocking reason to `logs/controller.log` (quiet while unchanged), plus a start banner with the effective pacing and host cap. Nothing rotates that file; at one line per start/reason change it grows slowly. If it ever matters, truncate it in place (`: > logs/controller.log`); launchd reopens with append semantics.
 
 ## Admission policy and normal operation
 

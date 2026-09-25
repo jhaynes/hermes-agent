@@ -75,7 +75,7 @@ class CliCommands:
     def decompose(self, board: str, task_id: str) -> CommandOutcome:
         result = self.runner(
             build_decompose_command(self.executable, board, task_id),
-            120.0,
+            120.0,  # decompose subprocess wall-clock timeout (not admission pacing)
             65536,
         )
         if result.uncertain:

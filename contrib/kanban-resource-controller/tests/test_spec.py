@@ -196,6 +196,20 @@ class TelemetrySpecTests(unittest.TestCase):
             }))
             self.assertEqual(zero.recovery_seconds, 0.0)
 
+    def test_interval_upper_bound_is_exact(self) -> None:
+        # A wide gap isolates the interval bound from the gap-must-exceed-interval rule.
+        wide = {"recovery_seconds": 5, "max_sample_gap_seconds": 400}
+        with tempfile.TemporaryDirectory() as root:
+            spec = RuntimeSpec.read(self._write(Path(root), {"interval_seconds": 300, "pacing": wide}))
+            self.assertEqual(spec.interval_seconds, 300)
+            with self.assertRaisesRegex(SpecError, "interval_seconds"):
+                RuntimeSpec.read(self._write(Path(root), {"interval_seconds": 301, "pacing": wide}))
+            with self.assertRaisesRegex(SpecError, "interval_seconds"):
+                RuntimeSpec.read(self._write(Path(root), {"interval_seconds": 0, "pacing": wide}))
+            self.assertEqual(
+                RuntimeSpec.read(self._write(Path(root), {"interval_seconds": 1, "pacing": wide})).interval_seconds, 1,
+            )
+
     def test_invalid_pacing_or_interval_refuses(self) -> None:
         bad = [
             {"interval_seconds": 0},

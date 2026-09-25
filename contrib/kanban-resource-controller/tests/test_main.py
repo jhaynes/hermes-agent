@@ -174,6 +174,25 @@ class PacingWiringTests(unittest.TestCase):
         self.assertTrue(policy.observe(_sample(40)).eligible)
 
 
+    def test_sample_gap_boundary_is_inclusive_of_the_configured_gap(self) -> None:
+        policy = admission_policy(SimpleNamespace(recovery_seconds=0.0, max_sample_gap_seconds=25.0))
+        policy.observe(_sample(0))
+        self.assertTrue(policy.observe(_sample(25)).eligible, "a gap exactly equal to the limit is continuous")
+        self.assertEqual(policy.observe(_sample(50.5)).reason, "sample-gap", "25.5 s exceeds the 25 s limit")
+
+    def test_command_consumed_sets_the_exact_dwell_baseline(self) -> None:
+        policy = admission_policy(SimpleNamespace(recovery_seconds=5.0, max_sample_gap_seconds=25.0))
+        policy.observe(_sample(0))
+        self.assertTrue(policy.observe(_sample(10)).eligible)
+        policy.command_consumed(10)
+        almost = policy.observe(_sample(14.999))
+        self.assertEqual(almost.reason, "recovery-dwell")
+        self.assertAlmostEqual(almost.healthy_seconds, 4.999, places=6)
+        exact = policy.observe(_sample(15))
+        self.assertTrue(exact.eligible, "eligible exactly recovery_seconds after the consumed instant")
+        self.assertEqual(exact.healthy_seconds, 5.0)
+
+
 class TransitionLogTests(unittest.TestCase):
     def test_logs_starts_and_reason_changes_only(self) -> None:
         with tempfile.TemporaryDirectory() as root:
