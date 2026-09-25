@@ -875,13 +875,15 @@ def _deliver_to_bot_chat(job: dict, content: str, profile: str, *, deferred: Opt
     # The running install first (same trust order as gateway.run._resolve_hermes_bin): the
     # scheduler lives in the long-running gateway, so a PATH-first lookup would hand delivery
     # to whatever `hermes` PATH names — another install, or a planted one — instead of this one.
+    # On a managed install that is the install's runtime command, as for the cron worker.
     try:
         import importlib.util as _ilu
         found = _ilu.find_spec("hermes_cli") is not None
     except Exception:
         found = False
     if found:
-        argv = [sys.executable, "-m", "hermes_cli.main"]
+        from cron.scheduler_worker_env import hermes_child_argv
+        argv = hermes_child_argv("hermes_cli.main", [])
     else:
         hermes_bin = shutil.which("hermes")
         if not hermes_bin:
