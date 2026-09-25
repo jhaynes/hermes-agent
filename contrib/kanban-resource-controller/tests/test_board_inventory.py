@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 from resource_controller.board_inventory import BoardInventoryError, read_board_inventory
+from resource_controller.inventory import LiveWorker
 
 
 _SCHEMA = """
@@ -17,7 +18,7 @@ CREATE TABLE tasks (
 );
 CREATE TABLE task_runs (
  id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT, status TEXT NOT NULL,
- worker_pid INTEGER, worker_started_at TEXT
+ worker_pid INTEGER, worker_started_at TEXT, ended_at INTEGER
 );
 CREATE TABLE kanban_notify_subs (task_id TEXT, notifier_profile TEXT);
 """
@@ -35,8 +36,8 @@ class BoardInventoryTests(unittest.TestCase):
             ("t_live", "Build", "builder", "done", 0, 1, 42, FINGERPRINT, 7),
         )
         connection.execute(
-            "INSERT INTO task_runs VALUES (?,?,?,?,?,?)",
-            (7, "t_live", "builder", "running", 42, FINGERPRINT),
+            "INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+            (7, "t_live", "builder", "running", 42, FINGERPRINT, None),
         )
         connection.execute(
             "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
@@ -155,6 +156,80 @@ class BoardInventoryTests(unittest.TestCase):
             with self.assertRaises(BoardInventoryError) as ctx:
                 read_board_inventory(path, board="alpha", max_rows=10)
             self.assertNotEqual(type(ctx.exception.__cause__), ValueError)
+
+    def test_ended_run_projection_requires_ended_at_and_retained_exact_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            prior = LiveWorker("alpha", "t_live", 7, 42, 1.0, "builder", "running", FINGERPRINT)
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "UPDATE tasks SET worker_pid=NULL, worker_started_at=NULL, current_run_id=NULL WHERE id='t_live'"
+            )
+            connection.commit()
+            connection.close()
+            snapshot = read_board_inventory(
+                path, board="alpha", max_rows=10, ended_candidates=(prior,),
+            )
+            self.assertEqual(snapshot.ended_runs, ())
+
+            connection = sqlite3.connect(path)
+            connection.execute("UPDATE task_runs SET status='done', ended_at=123 WHERE id=7")
+            connection.commit()
+            connection.close()
+            ended = read_board_inventory(
+                path, board="alpha", max_rows=10, ended_candidates=(prior,),
+            ).ended_runs
+            self.assertEqual(len(ended), 1)
+            self.assertEqual(
+                (ended[0].board, ended[0].task_id, ended[0].run_id, ended[0].profile,
+                 ended[0].pid, ended[0].worker_fingerprint.raw, ended[0].run_status, ended[0].ended_at),
+                ("alpha", "t_live", 7, "builder", 42, FINGERPRINT, "done", 123),
+            )
+
+    def test_unrelated_legacy_or_malformed_ended_history_is_ignored(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            prior = LiveWorker("alpha", "t_live", 7, 42, 1.0, "builder", "running", FINGERPRINT)
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "UPDATE tasks SET worker_pid=NULL, worker_started_at=NULL, current_run_id=NULL WHERE id='t_live'"
+            )
+            connection.execute("UPDATE task_runs SET status='done', ended_at=123 WHERE id=7")
+            for index, fingerprint in enumerate((None, "unverified", "malformed"), start=20):
+                connection.execute(
+                    "INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+                    (index, f"t_old{index}", "builder", "done", 42, fingerprint, 1),
+                )
+            connection.commit()
+            connection.close()
+            snapshot = read_board_inventory(
+                path, board="alpha", max_rows=2, ended_candidates=(prior,),
+            )
+            self.assertEqual(tuple(run.run_id for run in snapshot.ended_runs), (7,))
+
+    def test_matching_malformed_or_duplicate_ended_identity_holds(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            prior = LiveWorker("alpha", "t_live", 7, 42, 1.0, "builder", "running", FINGERPRINT)
+            connection = sqlite3.connect(path)
+            connection.execute(
+                "UPDATE tasks SET worker_pid=NULL, worker_started_at=NULL, current_run_id=NULL WHERE id='t_live'"
+            )
+            connection.execute(
+                "UPDATE task_runs SET status='done', ended_at=123, worker_started_at='unverified' WHERE id=7"
+            )
+            connection.commit()
+            connection.close()
+            with self.assertRaisesRegex(BoardInventoryError, "ended identity"):
+                read_board_inventory(path, board="alpha", max_rows=10, ended_candidates=(prior,))
+
+        with tempfile.TemporaryDirectory() as root:
+            path = self.make_db(root)
+            prior = LiveWorker("alpha", "t_live", 7, 42, 1.0, "builder", "running", FINGERPRINT)
+            with self.assertRaisesRegex(BoardInventoryError, "duplicate ended candidate"):
+                read_board_inventory(
+                    path, board="alpha", max_rows=10, ended_candidates=(prior, prior),
+                )
 
 
 if __name__ == "__main__":

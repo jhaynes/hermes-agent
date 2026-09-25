@@ -11,7 +11,16 @@ from unittest import mock
 
 from resource_controller.config import ConfigCompatibilityError
 from resource_controller.engine import ControllerEngine, GateSnapshot
-from resource_controller.main import _check, admission_policy, build_parser, log_transition, run_iteration, set_manual_hold
+from resource_controller.main import (
+    _check,
+    _notify_stuck,
+    _observe_alert,
+    admission_policy,
+    build_parser,
+    log_transition,
+    run_iteration,
+    set_manual_hold,
+)
 from resource_controller.inventory import LiveWorker
 from resource_controller.policy import AdmissionPolicy, HostSample
 from resource_controller.storage import SecureStateStore
@@ -105,7 +114,23 @@ class RunLoopTelemetryTests(unittest.TestCase):
             world = _ScriptedWorld([RuntimeError("boom")])
             engine = self._engine(root, world)
             run_iteration(engine, world, engine.store, stopping=False)
-            self.assertEqual(engine.store.read_json("status.json")["reason"], "persistent-operator-hold")
+            status = engine.store.read_json("status.json")
+            self.assertEqual(status["reason"], "persistent-operator-hold")
+            self.assertEqual(status["error"], "boom")
+
+    def test_stopping_waits_for_finishing_worker_then_exits(self) -> None:
+        finishing = LiveWorker("a", "t_a", 1, 41, 1.0, "builder", "done", "epoch|4100")
+        states = [
+            GateSnapshot("finishing", _sample(1), config(), None, False, (finishing,), (), 0),
+            GateSnapshot("gone", _sample(2), config(), None, False, (), (), 0),
+        ]
+        with tempfile.TemporaryDirectory() as root:
+            world = SimpleNamespace(capture=mock.Mock(side_effect=states))
+            store = SecureStateStore(Path(root) / "state")
+            engine = mock.Mock()
+            self.assertIsNone(run_iteration(engine, world, store, stopping=True))
+            self.assertEqual(store.read_json("status.json")["reason"], "draining-descendants")
+            self.assertEqual(run_iteration(engine, world, store, stopping=True), 0)
 
 
 class CheckOutputTests(unittest.TestCase):
@@ -205,6 +230,7 @@ class TransitionLogTests(unittest.TestCase):
                 {"reason": "dispatched", "actual_task_ids": ["t_a", "t_b"], "extra_starts": 1},
                 {"reason": "pressure", "actual_task_ids": [], "observed_blockers": ["pressure"], "pressure": "warning"},
                 {"reason": "pressure", "actual_task_ids": [], "observed_blockers": ["pressure"], "pressure": "warning"},
+                {"reason": "uncertain-outcome", "actual_task_ids": [], "error_type": "IdentityHold", "error": "bounded cause"},
                 {"reason": "eligible", "actual_task_ids": []},
             ]
             for status in sequence:
@@ -215,6 +241,7 @@ class TransitionLogTests(unittest.TestCase):
                 "reason=recovery-dwell",
                 "reason=dispatched started=t_a,t_b extra_starts=1",
                 "reason=pressure blockers=pressure pressure=warning",
+                "reason=uncertain-outcome error_type=IdentityHold error=bounded cause",
                 "reason=eligible",
             ])
 
@@ -233,6 +260,7 @@ class RunLoopWiringTests(unittest.TestCase):
         caps = AdmissionCaps(8, 1, (), 2, ())
         spec = SimpleNamespace(
             interval_seconds=7, recovery_seconds=3.0, max_sample_gap_seconds=20.0,
+            stuck_alert_after_seconds=180.0,
             admission_caps=caps, dispatcher_lock=Path("/unused/lock"),
         )
         with tempfile.TemporaryDirectory() as root:
@@ -272,6 +300,79 @@ class RunLoopWiringTests(unittest.TestCase):
             "reason=recovery-dwell",
             "stopped exit=0",
         ])
+
+    def test_darwin_notifier_uses_static_argv_no_shell_and_spec_timeout(self) -> None:
+        from resource_controller import main as main_module
+
+        completed = SimpleNamespace(returncode=0)
+        logged = []
+
+        def run_after_log(*_args, **_kwargs):
+            self.assertEqual(len(logged), 1, "stuck log must precede Notification Center")
+            return completed
+
+        with (
+            mock.patch.object(main_module.sys, "platform", "darwin"),
+            mock.patch.object(main_module.subprocess, "run", side_effect=run_after_log) as run,
+            mock.patch.object(main_module, "log_line", side_effect=logged.append),
+        ):
+            _notify_stuck(
+                {"reason": "uncertain-outcome", "error_type": "IdentityHold", "error": "worker x"},
+                7.0,
+            )
+        argv = run.call_args.args[0]
+        self.assertEqual(argv[:3], ["/usr/bin/osascript", "-e", main_module._NOTIFICATION_SCRIPT])
+        self.assertEqual(run.call_args.kwargs["timeout"], 7.0)
+        self.assertNotIn("shell", run.call_args.kwargs)
+        self.assertNotIn("worker x", main_module._NOTIFICATION_SCRIPT)
+        self.assertIn("stuck-alert reason=uncertain-outcome", logged[0])
+
+    def test_linux_notifier_logs_fallback_without_subprocess(self) -> None:
+        from resource_controller import main as main_module
+
+        out = io.StringIO()
+        with (
+            mock.patch.object(main_module.sys, "platform", "linux"),
+            mock.patch.object(main_module.subprocess, "run") as run,
+            redirect_stdout(out),
+        ):
+            _notify_stuck({"reason": "persistent-operator-hold", "error": "x"}, 3.0)
+        run.assert_not_called()
+        self.assertIn("notification-fallback=non-darwin", out.getvalue())
+
+    def test_configured_alert_threshold_controls_runtime_observation(self) -> None:
+        from resource_controller.alerting import StuckAlertTracker
+        from resource_controller import main as main_module
+
+        with tempfile.TemporaryDirectory() as root:
+            store = SecureStateStore(Path(root) / "state")
+            store.write_json("status.json", {
+                "reason": "uncertain-outcome", "error_type": "IdentityHold", "error": "stuck",
+            })
+            tracker = StuckAlertTracker(store)
+            spec = SimpleNamespace(stuck_alert_after_seconds=0.0, notify_timeout_seconds=11.0)
+            with (
+                mock.patch.object(main_module.time, "time", return_value=100.0),
+                mock.patch.object(main_module, "_notify_stuck") as notify,
+            ):
+                _observe_alert(tracker, store, spec)
+            notify.assert_called_once()
+            self.assertEqual(notify.call_args.args[1], 11.0)
+
+    def test_notification_timeout_logs_fallback_once(self) -> None:
+        from resource_controller import main as main_module
+
+        out = io.StringIO()
+        timeout = main_module.subprocess.TimeoutExpired(["osascript"], 4.0)
+        with (
+            mock.patch.object(main_module.sys, "platform", "darwin"),
+            mock.patch.object(main_module.subprocess, "run", side_effect=timeout) as run,
+            redirect_stdout(out),
+        ):
+            _notify_stuck({"reason": "uncertain-outcome", "error": "x"}, 4.0)
+        self.assertEqual(run.call_args.kwargs["timeout"], 4.0)
+        self.assertEqual(out.getvalue().count("stuck-alert"), 1)
+        self.assertIn("notification-fallback=TimeoutExpired", out.getvalue())
 
 
 class MainSurfaceTests(unittest.TestCase):

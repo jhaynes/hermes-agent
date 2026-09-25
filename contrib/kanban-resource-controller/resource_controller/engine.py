@@ -16,6 +16,7 @@ from .inventory import (
 from .policy import AdmissionPolicy, HostSample
 from .priority import PredictedPick, select_pick
 from .storage import SecureStateStore
+from .telemetry import sanitize_diagnostic
 from .telemetry import constants as telemetry_constants
 
 
@@ -53,10 +54,25 @@ class GateSnapshot:
 
 
 @dataclass(frozen=True)
+class ErrorDetail:
+    type: str
+    message: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "type", sanitize_diagnostic(self.type))
+        object.__setattr__(self, "message", sanitize_diagnostic(self.message))
+
+    @classmethod
+    def from_exception(cls, error: BaseException) -> "ErrorDetail":
+        return cls(type(error).__name__, str(error))
+
+
+@dataclass(frozen=True)
 class CommandOutcome:
     uncertain: bool
     actual_task_ids: tuple[str, ...] = ()
     spawned: tuple[tuple[str, str], ...] = ()
+    error: ErrorDetail | None = None
 
     @property
     def actual_task_id(self) -> str | None:
@@ -107,7 +123,11 @@ class ControllerEngine:
 
     def tick(self) -> TickResult:
         if self.store.has_pending_uncertainty():
-            return self._result("uncertain-outcome", sample=None)
+            return self._result(
+                "uncertain-outcome",
+                sample=None,
+                error=_pending_error(self.store.read_json("pending.json")),
+            )
         initial = self.world.capture()
         health = self.policy.observe(initial.sample)
         if not health.eligible:
@@ -275,10 +295,18 @@ class ControllerEngine:
                 outcome = self.commands.dispatch(  # type: ignore[arg-type]
                     predicted, final.config.failure_limit, dispatch_max,
                 )
-        except BaseException:
-            return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
+        except BaseException as exc:
+            return self._uncertain(
+                journal, ErrorDetail.from_exception(exc), final.sample,
+                observed_blockers=final_health.observed_blockers,
+            )
         if outcome.uncertain:
-            return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
+            return self._uncertain(
+                journal,
+                outcome.error or ErrorDetail("AmbiguousCommand", "command outcome is uncertain"),
+                final.sample,
+                observed_blockers=final_health.observed_blockers,
+            )
 
         violation: Capacity | None = None
         if kind == "dispatch":
@@ -287,12 +315,19 @@ class ControllerEngine:
                 actual_task_ids, violation = self._reconcile_dispatch(
                     final, post, outcome, predicted, dispatch_max,  # type: ignore[arg-type]
                 )
-            except Exception:
-                return self._result("uncertain-outcome", sample=final.sample, observed_blockers=final_health.observed_blockers)
+            except Exception as exc:
+                return self._uncertain(
+                    journal, ErrorDetail.from_exception(exc), final.sample,
+                    observed_blockers=final_health.observed_blockers,
+                )
             if violation is not None:
-                return self._result(
-                    "uncertain-outcome",
-                    sample=post.sample,
+                return self._uncertain(
+                    journal,
+                    ErrorDetail(
+                        "CapacityViolation",
+                        f"{violation.reason} {violation.name}: {violation.count} exceeds {violation.cap}",
+                    ),
+                    post.sample,
                     observed_blockers=final_health.observed_blockers,
                     cap_violation=violation,
                 )
@@ -318,6 +353,26 @@ class ControllerEngine:
             sample=final.sample,
             observed_blockers=final_health.observed_blockers,
             actual_task_ids=actual_task_ids,
+        )
+
+    def _uncertain(
+        self,
+        journal: dict[str, object],
+        error: ErrorDetail,
+        sample: HostSample,
+        *,
+        observed_blockers: tuple[str, ...] = (),
+        cap_violation: Capacity | None = None,
+    ) -> TickResult:
+        journal["outcome"] = "pending"
+        journal["error"] = {"type": error.type, "message": error.message}
+        self.store.write_json("pending.json", journal)
+        return self._result(
+            "uncertain-outcome",
+            sample=sample,
+            observed_blockers=observed_blockers,
+            cap_violation=cap_violation,
+            error=error,
         )
 
     def _reconcile_dispatch(
@@ -358,6 +413,7 @@ class ControllerEngine:
         observed_blockers: tuple[str, ...] = (),
         actual_task_ids: tuple[str, ...] = (),
         cap_violation: Capacity | None = None,
+        error: ErrorDetail | None = None,
     ) -> TickResult:
         payload: dict[str, object] = {
             "schema_version": telemetry_constants.SCHEMA_VERSION,
@@ -378,6 +434,9 @@ class ControllerEngine:
                 "count": cap_violation.count,
                 "cap": cap_violation.cap,
             }
+        if error is not None:
+            payload["error_type"] = error.type
+            payload["error"] = error.message
         if sample is not None:
             wall_time = time.time()
             interval_seconds = None
@@ -418,4 +477,19 @@ def _worker_identity(worker: LiveWorker) -> tuple[object, ...]:
         worker.board,
         worker.profile,
         worker.worker_fingerprint,
+    )
+
+
+def _pending_error(payload: object) -> ErrorDetail:
+    if isinstance(payload, dict):
+        raw = payload.get("error")
+        if (
+            isinstance(raw, dict)
+            and isinstance(raw.get("type"), str)
+            and isinstance(raw.get("message"), str)
+        ):
+            return ErrorDetail(raw["type"], raw["message"])
+    return ErrorDetail(
+        "PendingUncertainty",
+        "pending command outcome requires operator reconciliation",
     )

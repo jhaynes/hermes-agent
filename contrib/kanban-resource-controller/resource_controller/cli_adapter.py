@@ -12,7 +12,7 @@ from .cli_contract import (
     parse_dispatch_prediction,
     validate_dispatch_payload,
 )
-from .engine import BoardView, CommandOutcome
+from .engine import BoardView, CommandOutcome, ErrorDetail
 from .priority import PredictedPick
 from .supervision import CommandResult, run_supervised
 
@@ -64,12 +64,12 @@ class CliCommands:
             30.0,
             65536,
         )
+        if result.uncertain:
+            return CommandOutcome(True, error=_result_error(result))
         try:
             claims = _dispatch_claims(result.stdout, dispatch_max)
-        except (CommandContractError, TypeError, ValueError):
-            return CommandOutcome(True)
-        if result.uncertain:
-            return CommandOutcome(True)
+        except (CommandContractError, TypeError, ValueError) as exc:
+            return CommandOutcome(True, error=ErrorDetail("ContractDrift", str(exc)))
         return CommandOutcome(False, tuple(task_id for task_id, _ in claims), claims)
 
     def decompose(self, board: str, task_id: str) -> CommandOutcome:
@@ -79,24 +79,27 @@ class CliCommands:
             65536,
         )
         if result.uncertain:
-            return CommandOutcome(True)
+            return CommandOutcome(True, error=_result_error(result))
         try:
             payload = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            return CommandOutcome(True)
+        except json.JSONDecodeError as exc:
+            return CommandOutcome(True, error=ErrorDetail("ContractDrift", str(exc)))
         if (
             not isinstance(payload, dict)
             or set(payload) != _DECOMPOSE_KEYS
             or payload.get("task_id") != task_id
             or payload.get("ok") is not True
         ):
-            return CommandOutcome(True)
+            return CommandOutcome(True, error=ErrorDetail("ContractDrift", "decompose payload contract mismatch"))
         try:
             unexpected_worker = self.reconcile_actual(board, task_id)
-        except Exception:
-            return CommandOutcome(True)
+        except Exception as exc:
+            return CommandOutcome(True, error=ErrorDetail("AmbiguousReconciliation", str(exc)))
         if unexpected_worker is not None:
-            return CommandOutcome(True)
+            return CommandOutcome(
+                True,
+                error=ErrorDetail("AmbiguousReconciliation", "decompose started an unexpected worker"),
+            )
         return CommandOutcome(False, (task_id,))
 
 
@@ -120,3 +123,11 @@ def _dispatch_claims(output: str, dispatch_max: int) -> tuple[tuple[str, str], .
     if len({task_id for task_id, _ in claims}) != len(claims):
         raise CommandContractError("duplicate spawned task identity")
     return tuple(claims)
+
+
+def _result_error(result: CommandResult) -> ErrorDetail:
+    if result.timed_out:
+        return ErrorDetail("CommandTimeout", "command exceeded its observation deadline")
+    if result.truncated:
+        return ErrorDetail("CommandTruncated", "command output exceeded its bounded capture")
+    return ErrorDetail("CommandExit", f"command exited with status {result.returncode}")

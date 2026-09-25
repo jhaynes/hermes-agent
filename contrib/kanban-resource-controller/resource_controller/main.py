@@ -4,10 +4,12 @@ import argparse
 import json
 from pathlib import Path
 import signal
+import subprocess
 import sys
 import time
 from typing import Sequence
 
+from .alerting import StuckAlertTracker
 from .cli_adapter import CliCommands
 from .config import ConfigCompatibilityError
 from .engine import ControllerEngine
@@ -20,7 +22,7 @@ from .runtime import RuntimeWorld
 from .spec import RuntimeSpec
 from .storage import SecureStateStore
 from .inventory import existing_capacity_violation
-from .telemetry import TelemetryError, select_backend
+from .telemetry import TelemetryError, sanitize_diagnostic, select_backend
 from .telemetry import constants as telemetry_constants
 
 
@@ -200,8 +202,8 @@ def run_iteration(engine: ControllerEngine, world, store: SecureStateStore, *, s
         store.write_json("status.json", {
             "mode": "best-effort downstream-first",
             "reason": "persistent-operator-hold",
-            "error_type": type(exc).__name__,
-            "error": str(exc)[:1000],
+            "error_type": sanitize_diagnostic(type(exc).__name__),
+            "error": sanitize_diagnostic(str(exc)),
         })
     return None
 
@@ -223,6 +225,7 @@ def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
         _commands(spec, world),
     )
     stopping = False
+    alert_tracker = StuckAlertTracker(store, state_error=log_line)
 
     def request_stop(_signum, _frame) -> None:
         nonlocal stopping
@@ -238,6 +241,7 @@ def _run(spec: RuntimeSpec, store: SecureStateStore) -> int:
         while True:
             exit_code = run_iteration(engine, world, store, stopping=stopping)
             last = log_transition(store, last)
+            _observe_alert(alert_tracker, store, spec)
             if exit_code is not None:
                 log_line(f"stopped exit={exit_code}")
                 return exit_code
@@ -259,7 +263,13 @@ def log_transition(store: SecureStateStore, last: tuple | None, *, stream=None) 
         log_line(f"status-unreadable {type(exc).__name__}", stream=stream)
         return last
     started = tuple(status.get("actual_task_ids") or ())
-    key = (status.get("reason"), started, tuple(status.get("observed_blockers") or ()))
+    key = (
+        status.get("reason"),
+        started,
+        tuple(status.get("observed_blockers") or ()),
+        status.get("error_type"),
+        status.get("error"),
+    )
     if key != last:
         parts = [f"reason={key[0]}"]
         if started:
@@ -271,8 +281,60 @@ def log_transition(store: SecureStateStore, last: tuple | None, *, stream=None) 
         for field in ("pressure", "error_code", "error_type"):
             if status.get(field) not in (None, "normal"):
                 parts.append(f"{field}={status[field]}")
+        if status.get("error"):
+            parts.append(f"error={status['error']}")
         log_line(" ".join(parts), stream=stream)
     return key
+
+
+_NOTIFICATION_SCRIPT = (
+    "on run argv\n"
+    "display notification (item 2 of argv) with title (item 1 of argv)\n"
+    "end run"
+)
+
+
+def _observe_alert(tracker: StuckAlertTracker, store: SecureStateStore, spec: RuntimeSpec) -> None:
+    try:
+        status = store.read_json("status.json")
+    except Exception as exc:
+        log_line(f"alert-status-unreadable {type(exc).__name__}")
+        return
+    if not isinstance(status, dict):
+        log_line("alert-status-unreadable malformed")
+        return
+    tracker.observe(
+        status,
+        now=time.time(),
+        threshold=spec.stuck_alert_after_seconds,
+        notify=lambda details: _notify_stuck(details, spec.notify_timeout_seconds),
+    )
+
+
+def _notify_stuck(details: dict[str, object], timeout: float) -> None:
+    reason = sanitize_diagnostic(str(details.get("reason") or "unknown"))
+    error_type = sanitize_diagnostic(str(details.get("error_type") or ""))
+    error = sanitize_diagnostic(str(details.get("error") or ""))
+    log_line(f"stuck-alert reason={reason} error_type={error_type} error={error}")
+    if sys.platform == "darwin":
+        try:
+            result = subprocess.run(
+                [
+                    "/usr/bin/osascript", "-e", _NOTIFICATION_SCRIPT,
+                    "Hermes Kanban controller stuck", f"{reason}: {error_type}: {error}",
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=timeout,
+                check=False,
+            )
+            if result.returncode:
+                log_line(f"notification-fallback=exit-{result.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            log_line(f"notification-fallback={type(exc).__name__}")
+    else:
+        log_line("notification-fallback=non-darwin")
 
 
 def main(argv: Sequence[str] | None = None) -> int:

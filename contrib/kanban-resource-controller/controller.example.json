@@ -22,5 +22,9 @@
   "pacing": {
     "recovery_seconds": 5,
     "max_sample_gap_seconds": 25
+  },
+  "alerting": {
+    "stuck_after_seconds": 180,
+    "notify_timeout_seconds": 10
   }
 }

@@ -93,8 +93,10 @@ class CliAdapterTests(unittest.TestCase):
         self.assertEqual(outcome.spawned, (("t_1", "builder"), ("t_2", "builder")))
         self.assertFalse(outcome.uncertain)
         self.assertTrue(adapter(rows).dispatch(pick, 2, 1).uncertain)
-        self.assertTrue(adapter([rows[0], rows[0]]).dispatch(pick, 2, 2).uncertain)
-        self.assertTrue(adapter([{"task_id": "t_1"}]).dispatch(pick, 2, 1).uncertain)
+        duplicate = adapter([rows[0], rows[0]]).dispatch(pick, 2, 2)
+        malformed = adapter([{"task_id": "t_1"}]).dispatch(pick, 2, 1)
+        self.assertEqual(duplicate.error.type, "ContractDrift")
+        self.assertEqual(malformed.error.type, "ContractDrift")
 
     def test_timeout_or_bad_decomposition_is_uncertain(self) -> None:
         def timed(argv: list[str], timeout: float, limit: int) -> CommandResult:
@@ -105,8 +107,11 @@ class CliAdapterTests(unittest.TestCase):
             runner=timed,
             reconcile_actual=lambda _board, _before: None,
         )
-        self.assertTrue(adapter.dispatch(PredictedPick("a", "t_1", "builder", "Build"), 2, 1).uncertain)
-        self.assertTrue(adapter.decompose("a", "t_triage").uncertain)
+        dispatch = adapter.dispatch(PredictedPick("a", "t_1", "builder", "Build"), 2, 1)
+        decompose = adapter.decompose("a", "t_triage")
+        self.assertEqual(dispatch.error.type, "CommandTimeout")
+        self.assertEqual(decompose.error.type, "CommandTimeout")
+        self.assertNotIn("{}", decompose.error.message)
 
     def test_decomposition_requires_requested_task_and_confirmed_success(self) -> None:
         self.actual = None
@@ -115,7 +120,9 @@ class CliAdapterTests(unittest.TestCase):
         self.assertEqual(outcome.actual_task_id, "t_triage")
         self.assertNotIn("--all", self.calls[0][0])
         self.actual = "t_manual"
-        self.assertTrue(self.adapter.decompose("alpha", "t_triage").uncertain)
+        uncertain = self.adapter.decompose("alpha", "t_triage")
+        self.assertTrue(uncertain.uncertain)
+        self.assertEqual(uncertain.error.type, "AmbiguousReconciliation")
 
 
 if __name__ == "__main__":

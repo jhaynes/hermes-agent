@@ -40,7 +40,7 @@ CREATE TABLE tasks (
 );
 CREATE TABLE task_runs (
   id INTEGER PRIMARY KEY, task_id TEXT NOT NULL, profile TEXT, status TEXT NOT NULL,
-  worker_pid INTEGER, worker_started_at TEXT
+  worker_pid INTEGER, worker_started_at TEXT, ended_at INTEGER
 );
 CREATE TABLE kanban_notify_subs (task_id TEXT, notifier_profile TEXT);
 """
@@ -149,8 +149,8 @@ class ContractGateTests(unittest.TestCase):
                     ("t_gate001", "Gate", "reviewquality", "running", 0, 1, child.pid, fingerprint, 1),
                 )
                 connection.execute(
-                    "INSERT INTO task_runs VALUES (?,?,?,?,?,?)",
-                    (1, "t_gate001", "reviewquality", "running", child.pid, fingerprint),
+                    "INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+                    (1, "t_gate001", "reviewquality", "running", child.pid, fingerprint, None),
                 )
                 connection.commit()
                 connection.close()

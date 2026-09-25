@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 
 from resource_controller.inventory import (
     CanonicalRun,
@@ -108,6 +109,52 @@ class ReconciliationTests(unittest.TestCase):
         )
         with self.assertRaises(IdentityHold):
             self.reconcile([], [unknown])
+
+    def test_exact_previous_and_ended_identity_authorizes_finishing_worker(self) -> None:
+        previous = LiveWorker(
+            "alpha", "t_123", 7, 42, 1000.2, "builder", "running", f"{EPOCH}|1000",
+        )
+        ended = SimpleNamespace(
+            board="alpha", task_id="t_123", run_id=7, pid=42, profile="builder",
+            worker_fingerprint=parse_stored_fingerprint(f"{EPOCH}|1000"), run_status="done",
+        )
+        workers = reconcile_workers(
+            [], [self.process()], epoch=EPOCH, ended_runs=(ended,), previous_workers=(previous,),
+        )
+        self.assertEqual(len(workers), 1)
+        self.assertEqual(workers[0].task_status, "done")
+        self.assertEqual(workers[0].worker_fingerprint, previous.worker_fingerprint)
+
+    def test_finishing_worker_requires_board_profile_unique_pid_and_every_marker(self) -> None:
+        previous = LiveWorker(
+            "alpha", "t_123", 7, 42, 1000.2, "builder", "running", f"{EPOCH}|1000",
+        )
+
+        def ended(**changes):
+            values = dict(
+                board="alpha", task_id="t_123", run_id=7, pid=42, profile="builder",
+                worker_fingerprint=parse_stored_fingerprint(f"{EPOCH}|1000"), run_status="done",
+            )
+            values.update(changes)
+            return SimpleNamespace(**values)
+
+        cases = [
+            ((ended(board="other"),), (previous,), self.process()),
+            ((ended(profile="reviewer"),), (previous,), self.process()),
+            ((ended(),), (previous, previous), self.process()),
+        ]
+        for marker in (
+            "HERMES_KANBAN_TASK", "HERMES_KANBAN_RUN_ID", "HERMES_KANBAN_BOARD", "HERMES_PROFILE",
+        ):
+            environment = dict(self.process().environment)
+            environment[marker] = "wrong"
+            cases.append(((ended(),), (previous,), self.process(environment=environment)))
+        for ended_runs, previous_workers, process in cases:
+            with self.subTest(ended=ended_runs, environment=process.environment), self.assertRaises(IdentityHold):
+                reconcile_workers(
+                    [], [process], epoch=EPOCH,
+                    ended_runs=ended_runs, previous_workers=previous_workers,
+                )
 
     def test_capacity_is_host_profile_and_board_admission_only(self) -> None:
         one = self.reconcile([self.canonical()], [self.process()])

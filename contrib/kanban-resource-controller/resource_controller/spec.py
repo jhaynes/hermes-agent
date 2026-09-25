@@ -20,7 +20,7 @@ _KEYS = {
     "hermes_executable", "hermes_home", "source_root", "expected_source_commit",
     "dispatcher_lock", "state_dir", "boards", "interval_seconds",
 }
-_OPTIONAL_KEYS = {"telemetry", "admission", "pacing"}
+_OPTIONAL_KEYS = {"telemetry", "admission", "pacing", "alerting"}
 _SLUG = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _ADMISSION_KEYS = {
@@ -30,6 +30,9 @@ DEFAULT_HOST_CAP, DEFAULT_PROFILE_CAP, DEFAULT_BOARD_CAP = 2, 1, 1
 # Pacing defaults apply only when controller.json has no ``pacing`` section.
 DEFAULT_RECOVERY_SECONDS, DEFAULT_MAX_SAMPLE_GAP_SECONDS = 120.0, 35.0
 _PACING_KEYS = {"recovery_seconds", "max_sample_gap_seconds"}
+DEFAULT_STUCK_ALERT_AFTER_SECONDS = 180.0
+DEFAULT_NOTIFY_TIMEOUT_SECONDS = 10.0
+_ALERTING_KEYS = {"stuck_after_seconds", "notify_timeout_seconds"}
 MAX_INTERVAL_SECONDS = 300
 
 
@@ -67,6 +70,8 @@ class RuntimeSpec:
     linux_psi_full_avg10_critical: float = constants.DEFAULT_LINUX_PSI_FULL_AVG10_CRITICAL
     recovery_seconds: float = DEFAULT_RECOVERY_SECONDS
     max_sample_gap_seconds: float = DEFAULT_MAX_SAMPLE_GAP_SECONDS
+    stuck_alert_after_seconds: float = DEFAULT_STUCK_ALERT_AFTER_SECONDS
+    notify_timeout_seconds: float = DEFAULT_NOTIFY_TIMEOUT_SECONDS
 
     @classmethod
     def read(cls, path: Path) -> "RuntimeSpec":
@@ -120,6 +125,9 @@ class RuntimeSpec:
         )
         some_warning, full_critical = _linux_psi(raw.get("telemetry"))
         recovery, sample_gap = _pacing(raw.get("pacing"), interval, present="pacing" in raw)
+        stuck_alert_after, notify_timeout = _alerting(
+            raw.get("alerting"), present="alerting" in raw,
+        )
         return cls(
             paths["hermes_executable"],
             paths["hermes_home"],
@@ -134,6 +142,8 @@ class RuntimeSpec:
             full_critical,
             recovery,
             sample_gap,
+            stuck_alert_after,
+            notify_timeout,
         )
 
 
@@ -206,6 +216,25 @@ def _nonnegative_number(value: object, key: str) -> float:
     if not math.isfinite(value) or not 0.0 <= value <= 3600.0:
         raise SpecError(f"{key} must be finite and within [0, 3600]")
     return value
+
+
+def _alerting(alerting: object, *, present: bool) -> tuple[float, float]:
+    if not present:
+        return DEFAULT_STUCK_ALERT_AFTER_SECONDS, DEFAULT_NOTIFY_TIMEOUT_SECONDS
+    if not isinstance(alerting, dict) or set(alerting) != _ALERTING_KEYS:
+        raise SpecError(
+            "alerting keys must be exactly stuck_after_seconds and notify_timeout_seconds"
+        )
+    stuck_after = _nonnegative_number(
+        alerting["stuck_after_seconds"], "alerting.stuck_after_seconds",
+    )
+    notify_timeout = alerting["notify_timeout_seconds"]
+    if isinstance(notify_timeout, bool) or not isinstance(notify_timeout, (int, float)):
+        raise SpecError("alerting.notify_timeout_seconds must be a number")
+    notify_timeout = float(notify_timeout)
+    if not math.isfinite(notify_timeout) or not 1.0 <= notify_timeout <= 60.0:
+        raise SpecError("alerting.notify_timeout_seconds must be finite and within [1, 60]")
+    return stuck_after, notify_timeout
 
 
 def _linux_psi(telemetry: object) -> tuple[float, float]:

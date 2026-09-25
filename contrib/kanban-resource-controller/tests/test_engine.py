@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import sqlite3
 import tempfile
 import unittest
+from unittest import mock
 
 from resource_controller.config import ControllerConfig
 from resource_controller.cli_contract import PrecommandRace
@@ -11,11 +13,13 @@ from resource_controller.engine import (
     BoardView,
     CommandOutcome,
     ControllerEngine,
+    ErrorDetail,
     GateSnapshot,
 )
-from resource_controller.inventory import LiveWorker
+from resource_controller.inventory import LiveWorker, ProcessSnapshot
 from resource_controller.policy import AdmissionPolicy, HostSample
 from resource_controller.priority import PredictedPick
+from resource_controller.runtime import RuntimeWorld
 from resource_controller.storage import SecureStateStore
 from resource_controller.spec import AdmissionCaps
 
@@ -72,13 +76,15 @@ def snapshot(
 
 
 class FakeWorld:
-    def __init__(self, states: list[GateSnapshot]) -> None:
+    def __init__(self, states: list[GateSnapshot | BaseException]) -> None:
         self.states = states
         self.index = 0
 
     def capture(self) -> GateSnapshot:
         state = self.states[min(self.index, len(self.states) - 1)]
         self.index += 1
+        if isinstance(state, BaseException):
+            raise state
         return state
 
 
@@ -187,6 +193,22 @@ class EngineTests(unittest.TestCase):
             self.assertEqual(result.reason, "precommand-race")
             self.assertEqual(commands.calls, [])
             self.assertEqual(engine.passed, {}, "aborted windows must not count as passed admissions")
+
+    def test_finishing_transition_at_final_fence_is_precommand_race(self) -> None:
+        caps = AdmissionCaps(4, 2, (), 4, ())
+        board = BoardView("a", {"t_new": "Build"}, {"t_new": "builder"}, None)
+        active = LiveWorker("a", "t_old", 1, 41, 1.0, "reviewer", "running", "epoch|4100")
+        finishing = LiveWorker("a", "t_old", 1, 41, 1.0, "reviewer", "done", "epoch|4100")
+        with tempfile.TemporaryDirectory() as root:
+            world = FakeWorld([
+                snapshot(120, fingerprint="active", boards=(board,), workers=(active,), caps=caps),
+                snapshot(121, fingerprint="finishing", boards=(board,), workers=(finishing,), caps=caps),
+            ])
+            commands = FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_new", "builder", "Build")}
+            engine = self.make_engine(root, world, commands)
+            self.assertEqual(engine.tick().reason, "precommand-race")
+            self.assertEqual(commands.calls, [])
 
     def test_multirow_dry_run_is_precommand_race_without_mutating_dispatch(self) -> None:
         board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
@@ -439,14 +461,177 @@ class EngineTests(unittest.TestCase):
             states = [snapshot(120, boards=(board,)), snapshot(121, boards=(board,))]
             commands = FakeCommands()
             commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
-            commands.outcome = CommandOutcome(True)
+            commands.outcome = CommandOutcome(
+                True, error=ErrorDetail("CommandTimeout", "timed\n out"),
+            )
             first = self.make_engine(root, FakeWorld(states), commands).tick()
             self.assertEqual(first.reason, "uncertain-outcome")
+            pending = self.make_engine(root, FakeWorld(states), commands).store.read_json("pending.json")
+            self.assertEqual(pending["error"], {"type": "CommandTimeout", "message": "timed out"})
 
             restarted_commands = FakeCommands()
-            restarted = self.make_engine(root, FakeWorld([snapshot(120, boards=(board,))]), restarted_commands).tick()
+            restarted_engine = self.make_engine(root, FakeWorld([snapshot(120, boards=(board,))]), restarted_commands)
+            restarted = restarted_engine.tick()
             self.assertEqual(restarted.reason, "uncertain-outcome")
+            status = restarted_engine.store.read_json("status.json")
+            self.assertEqual((status["error_type"], status["error"]), ("CommandTimeout", "timed out"))
             self.assertEqual(restarted_commands.calls, [])
+
+    def test_each_engine_uncertainty_path_persists_bounded_reason(self) -> None:
+        board = BoardView("a", {"t_1": "Build"}, {"t_1": "builder"}, None)
+        started = LiveWorker("a", "t_1", 7, 42, 1.0, "builder", "running")
+
+        def prepared(root: str, states, commands=None):
+            commands = commands or FakeCommands()
+            commands.predictions = {"a": PredictedPick("a", "t_1", "builder", "Build")}
+            return self.make_engine(root, FakeWorld(states), commands), commands
+
+        cases = []
+        raising = FakeCommands()
+        raising.dispatch = lambda *_args: (_ for _ in ()).throw(RuntimeError("boom\n" + "x" * 500))
+        cases.append((
+            [snapshot(120, boards=(board,)), snapshot(121, boards=(board,))], raising, "RuntimeError",
+        ))
+        uncertain = FakeCommands()
+        uncertain.outcome = CommandOutcome(True, error=ErrorDetail("ContractDrift", "bad contract"))
+        cases.append((
+            [snapshot(120, boards=(board,)), snapshot(121, boards=(board,))], uncertain, "ContractDrift",
+        ))
+        post_capture = FakeCommands()
+        post_capture.outcome = CommandOutcome(False, ("t_1",), (("t_1", "builder"),))
+        cases.append((
+            [snapshot(120, boards=(board,)), snapshot(121, boards=(board,)), RuntimeError("post failed")],
+            post_capture, "RuntimeError",
+        ))
+        reconcile = FakeCommands()
+        reconcile.outcome = CommandOutcome(False, ("t_1",), (("t_1", "builder"),))
+        cases.append((
+            [snapshot(120, boards=(board,)), snapshot(121, boards=(board,)), snapshot(122, boards=(board,))],
+            reconcile, "RuntimeError",
+        ))
+        caps = AdmissionCaps(1, 1, (), 1, ())
+        violation = FakeCommands()
+        violation.outcome = CommandOutcome(False, ("t_1",), (("t_1", "builder"),))
+        cases.append((
+            [snapshot(120, boards=(board,), caps=caps), snapshot(121, boards=(board,), caps=caps),
+             snapshot(122, boards=(board,), workers=(started, started), caps=caps)],
+            violation, "CapacityViolation",
+        ))
+
+        for states, commands, expected_type in cases:
+            with self.subTest(expected_type=expected_type), tempfile.TemporaryDirectory() as root:
+                engine, commands = prepared(root, states, commands)
+                self.assertEqual(engine.tick().reason, "uncertain-outcome")
+                pending = engine.store.read_json("pending.json")
+                status = engine.store.read_json("status.json")
+                self.assertEqual(pending["error"]["type"], expected_type)
+                self.assertEqual(status["error_type"], expected_type)
+                self.assertEqual(status["error"], pending["error"]["message"])
+                self.assertNotIn("\n", status["error"])
+                self.assertLessEqual(len(status["error"]), 300)
+
+    def test_legacy_pending_gets_safe_fallback_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            engine = self.make_engine(root, FakeWorld([]), FakeCommands())
+            legacy = {"outcome": "pending", "kind": "dispatch", "task_id": "t_x"}
+            engine.store.write_json("pending.json", legacy)
+            self.assertEqual(engine.tick().reason, "uncertain-outcome")
+            self.assertEqual(engine.store.read_json("pending.json"), legacy)
+            status = engine.store.read_json("status.json")
+            self.assertEqual(status["error_type"], "PendingUncertainty")
+            self.assertIn("operator reconciliation", status["error"])
+
+    @mock.patch("resource_controller.runtime.current_instantiation_epoch", return_value="epoch")
+    def test_post_dispatch_capture_tolerates_unrelated_just_ended_worker(self, _epoch) -> None:
+        caps = AdmissionCaps(4, 2, (), 4, ())
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            db = base / "board.db"
+            connection = sqlite3.connect(db)
+            connection.executescript("""
+                CREATE TABLE tasks (
+                  id TEXT PRIMARY KEY, title TEXT, assignee TEXT, status TEXT,
+                  priority INTEGER, created_at INTEGER, worker_pid INTEGER,
+                  worker_started_at TEXT, current_run_id INTEGER
+                );
+                CREATE TABLE task_runs (
+                  id INTEGER PRIMARY KEY, task_id TEXT, profile TEXT, status TEXT,
+                  worker_pid INTEGER, worker_started_at TEXT, ended_at INTEGER
+                );
+                CREATE TABLE kanban_notify_subs (task_id TEXT, notifier_profile TEXT);
+            """)
+            connection.execute(
+                "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
+                ("t_a", "Existing", "reviewer", "running", 0, 1, 41, "epoch|4100", 1),
+            )
+            connection.execute(
+                "INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+                (1, "t_a", "reviewer", "running", 41, "epoch|4100", None),
+            )
+            connection.execute(
+                "INSERT INTO tasks VALUES (?,?,?,?,?,?,?,?,?)",
+                ("t_b", "Build", "builder", "ready", 10, 2, None, None, None),
+            )
+            connection.commit()
+            connection.close()
+
+            def process(pid, task, run, profile, start):
+                return ProcessSnapshot(
+                    pid, start / 100, 1,
+                    ("/python", "-m", "hermes_cli.main", "-p", profile, "--cli",
+                     "--accept-hooks", "chat", "-q", f"work kanban task {task}", "-Q"),
+                    {"HERMES_KANBAN_TASK": task, "HERMES_KANBAN_RUN_ID": str(run),
+                     "HERMES_KANBAN_BOARD": "a", "HERMES_PROFILE": profile},
+                    True, start,
+                )
+
+            processes = [process(41, "t_a", 1, "reviewer", 4100)]
+            raw = {
+                "dispatch_in_gateway": False, "max_in_progress": 4,
+                "max_in_progress_per_profile": 2, "failure_limit": 2,
+                "auto_decompose": False, "reconcile_orphans": True,
+                "dispatch_stale_timeout_seconds": 0, "review_dispatch": True,
+                "default_assignee": None, "dispatch_profiles": ["builder", "reviewer"],
+            }
+            sample_clock = iter((120.0, 121.0, 122.0, 123.0))
+            world = RuntimeWorld(
+                boards={"a": db}, admission_caps=caps,
+                sampler=lambda: host(next(sample_clock)), config_reader=lambda: raw,
+                process_reader=lambda: tuple(processes), estop_paths=(), manual_hold=lambda: False,
+            )
+
+            class Commands:
+                def predict(self, board, failure_limit, dispatch_max):
+                    return PredictedPick("a", "t_b", "builder", "Build")
+
+                def dispatch(self, pick, failure_limit, dispatch_max):
+                    connection = sqlite3.connect(db)
+                    connection.execute(
+                        "UPDATE tasks SET status='done', worker_pid=NULL, worker_started_at=NULL, current_run_id=NULL WHERE id='t_a'"
+                    )
+                    connection.execute("UPDATE task_runs SET status='done', ended_at=200 WHERE id=1")
+                    connection.execute(
+                        "UPDATE tasks SET status='running', worker_pid=42, worker_started_at='epoch|4200', current_run_id=2 WHERE id='t_b'"
+                    )
+                    connection.execute(
+                        "INSERT INTO task_runs VALUES (?,?,?,?,?,?,?)",
+                        (2, "t_b", "builder", "running", 42, "epoch|4200", None),
+                    )
+                    connection.commit()
+                    connection.close()
+                    processes.append(process(42, "t_b", 2, "builder", 4200))
+                    return CommandOutcome(False, ("t_b",), (("t_b", "builder"),))
+
+                def decompose(self, board, task_id):
+                    raise AssertionError("not used")
+
+            policy = AdmissionPolicy(recovery_seconds=0, max_sample_gap=35)
+            policy.observe(host(110))
+            engine = ControllerEngine(policy, SecureStateStore(base / "state"), world, Commands())
+            self.assertEqual(engine.tick().reason, "dispatched")
+            post = world.capture()
+            self.assertEqual({worker.task_id for worker in post.workers}, {"t_a", "t_b"})
+            self.assertEqual(len(post.workers), 2)
 
 
 class StatusDeltaTests(unittest.TestCase):

@@ -233,6 +233,37 @@ class TelemetrySpecTests(unittest.TestCase):
                 with self.assertRaises(SpecError):
                     RuntimeSpec.read(self._write(Path(root), extra))
 
+    def test_alert_delay_defaults_and_configured_value_reach_runtime_spec(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            base = Path(root)
+            self.assertEqual(RuntimeSpec.read(self._write(base)).stuck_alert_after_seconds, 180.0)
+            self.assertEqual(RuntimeSpec.read(self._write(base)).notify_timeout_seconds, 10.0)
+            configured = RuntimeSpec.read(self._write(base, {
+                "alerting": {"stuck_after_seconds": 17.5, "notify_timeout_seconds": 12.5},
+            }))
+            self.assertEqual(configured.stuck_alert_after_seconds, 17.5)
+            self.assertEqual(configured.notify_timeout_seconds, 12.5)
+
+    def test_alerting_contract_rejects_unknown_or_invalid_values(self) -> None:
+        bad = [
+            {"alerting": []},
+            {"alerting": {}},
+            {"alerting": {"stuck_after_seconds": 1, "notify_timeout_seconds": 10, "typo": 2}},
+            {"alerting": {"stuck_after_seconds": True, "notify_timeout_seconds": 10}},
+            {"alerting": {"stuck_after_seconds": "180", "notify_timeout_seconds": 10}},
+            {"alerting": {"stuck_after_seconds": -1, "notify_timeout_seconds": 10}},
+            {"alerting": {"stuck_after_seconds": 3601, "notify_timeout_seconds": 10}},
+            {"alerting": {"stuck_after_seconds": float("nan"), "notify_timeout_seconds": 10}},
+            {"alerting": {"stuck_after_seconds": 1, "notify_timeout_seconds": True}},
+            {"alerting": {"stuck_after_seconds": 1, "notify_timeout_seconds": 0.999}},
+            {"alerting": {"stuck_after_seconds": 1, "notify_timeout_seconds": 60.001}},
+            {"alerting": {"stuck_after_seconds": 1, "notify_timeout_seconds": float("nan")}},
+        ]
+        for extra in bad:
+            with self.subTest(extra=extra), tempfile.TemporaryDirectory() as root:
+                with self.assertRaises(SpecError):
+                    RuntimeSpec.read(self._write(Path(root), extra))
+
 
 if __name__ == "__main__":
     unittest.main()

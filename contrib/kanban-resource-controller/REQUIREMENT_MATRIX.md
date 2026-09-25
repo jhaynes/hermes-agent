@@ -29,6 +29,7 @@ All automated tests run serially. `PASS` below means implemented unit/contract c
 | T-023 no production mutation | PASS for build/verification | only isolated worktree files and task records changed; fake executable, synthetic SQLite, injected telemetry/process/clock, and temporary state only |
 | T-024 source/static boundaries | PASS | standalone artifact imports no Hermes private module; serial compile, plist lint, diff check, and added-line security scan are handoff gates |
 | T-025 worker start-fingerprint identity (REQUIREMENT_LEDGER §18) | PASS | `test_worker_identity` (34 tests: composite parse, golden `'|179027411681'` value, epoch port incl. partial-read cases, Linux `/proc` field-22 parity, Darwin centisecond scaling, exact-string match/no tolerance, `require_consistent` tasks-vs-runs conflict); `test_board_inventory`/`test_inventory`/`test_runtime` updated fixtures; `tests/test_contract_gate.py` + `scripts/contract_gate.py` mandatory (fails, not skips, without `HERMES_SOURCE_ROOT`) end-to-end real-child-process proof against pinned Hermes `_process_fingerprint`; 9/9 hand-crafted mutants killed, plus 9 more after review round 1 (`tests/test_processes.py`, `tests/test_contract_gate_script.py`; see REQUIREMENT_LEDGER §18) |
+| T-026 finishing worker / bounded uncertainty / stuck alert (REQUIREMENT_LEDGER §20) | PASS (isolated) | Exact retained ended-run + prior/current process proof; restart/no-prior and all mismatch holds; real post-dispatch race; same worker identity and capacity/drain accounting; sanitized journal/status/log diagnostics and legacy fallback; strict configured alert delay, durable one-shot restart behavior, static Darwin argv and Linux log-only path. See the RED and 27-mutant receipts below. |
 
 ## Failure-path evidence
 
@@ -90,6 +91,59 @@ Disposable copies were made from the implementation tree; each row records the d
 | (x) null/empty `dispatch_profiles` with no profile overrides | `test_empty_profile_registry_is_refused_without_profile_overrides` | 1 |
 
 The reviewsystem low finding (the in-tree old-reader test exercises the current reader, not the installed 7771e842 binary) is recorded as a release-procedure check instead: RUNBOOK install step "old-reader check" runs the extracted previous archive's `SecureStateStore.has_pending_uncertainty` against the live journal before a binary swap. The review ran that probe live: reconciled multi-start is non-blocking, and pending/uncertain is blocking.
+
+## Finishing-worker TDD, compatibility, and mutation receipt
+
+Binding plan SHA-256: `cf719287ed03e219ff8f16f7603395abd0878489823412ab56c3134ddfc62c9d`; binding Addendum 1 SHA-256: `acb1252f9d370701da21ca7e4ebc3b9cb797dd7b26d0a3472c27ac7ce9ec64d1`. Exact base/tree: `d25d1dd82edb8ae66d8ddee400b0a90e5b9f7bbb` / `2c38abfc863506ac0eacf40808ff5e20fffebdff`.
+
+| Proven-red slice on base | Exact test | Observed base result |
+|---|---|---|
+| retained ended run projection | `test_ended_run_projection_requires_ended_at_and_retained_exact_identity` | API rejected `ended_candidates` |
+| normal second capture | `test_second_capture_keeps_just_ended_worker_counted` | `IdentityHold: worker process 42 has no canonical run` |
+| post-dispatch just-ended worker | `test_post_dispatch_capture_tolerates_unrelated_just_ended_worker` | `uncertain-outcome`, expected `dispatched` |
+| structured uncertainty | `test_uncertain_command_persists_and_blocks_restart` | `CommandOutcome` rejected `error=` |
+| configured alert delay | `test_alert_delay_defaults_and_configured_value_reach_runtime_spec` | `RuntimeSpec` lacked `stuck_alert_after_seconds` |
+| alert tracker | `test_alerting.StuckAlertTrackerTests` | `resource_controller.alerting` absent |
+
+Safety-characterization cases (no prior identity, mismatches, exact board/profile/unique PID, stopping) already held on base where applicable; the mutation campaign proves the narrow exception did not widen them. The actual extracted `9b0b4f26` reader returned `True` for a new pending journal with additive `error` and `False` for reconciled with additive `error`.
+
+All mutations ran the complete suite in a disposable copy. The Addendum 1 mandatory core is M01/M02/M03/M05/M09/M10/M15/M17; every other row is defence-in-depth. Raw receipt: `/Users/jhaynes/.hermes/profiles/builder/cache/scratch/controller-finishing-mutation-results.json`.
+
+| Mutant | Exact killer | Exit | Disposable tree SHA-256 |
+|---|---|---:|---|
+| `M01-no-prior-guard` | `test_ended_worker_without_previous_capture_holds` | 1 | `6a2f157659019616595577bcc0d04f76cefeb2345e7fb5443a694c39993ce7a3` |
+| `M02-ignore-ended-at` | `test_consecutive_active_captures_do_not_create_ended_evidence_or_hold` | 1 | `f7e0ccf5beb37d605df64bcfb447204d11920871f060e41ff5407fde6f9a87d7` |
+| `M03-bypass-fingerprint` | `test_previous_identity_mismatch_or_unended_run_holds` | 1 | `676713cc939f4d0d47826116f1d706d1cc7329214bd262603c415c5e32394f30` |
+| `M04-bypass-argv` | `test_previous_identity_mismatch_or_unended_run_holds` | 1 | `02440900cb40ae5e33f98a6ea84e37694af64fb0b1fa8a1d7a96712cc19bcb1e` |
+| `M05-bypass-environment` | `test_finishing_worker_requires_board_profile_unique_pid_and_every_marker` | 1 | `e8a473bab0f0a9d503b5c2c8dfd51d5994a60466e939aed185550370a064807f` |
+| `M06-persist-prior-across-runtime` | `test_previous_identity_is_not_shared_with_a_fresh_runtime_world` | 1 | `a5bdbdd5f232eb0f03c3488024f5601658da9562c7d96e5c58f30facbf225cb6` |
+| `M07-omit-finishing` | `test_second_capture_keeps_just_ended_worker_counted` | 1 | `c6298c19e359e83c62ba13c4b340d9e73ce7880b5c68d76916780b30b521eee2` |
+| `M08-status-in-dispatch-identity` | `test_post_dispatch_capture_tolerates_unrelated_just_ended_worker` | 1 | `73a435625ff9c80acdbcd6ac99465c1633e5a512a965481e2d8a2c9d51cec756` |
+| `M09-publish-cache-early` | `test_failed_capture_does_not_poison_previous_identity_cache` | 1 | `e8f437e749bc3d3fca4c566607e2ef8962a6b4356703a5de34499563cd1c9f7a` |
+| `M10-drop-journal-error` | `test_each_engine_uncertainty_path_persists_bounded_reason` | 1 | `3be571b000c8ececeff309ada0a3ddc1c0d30b29bded8942528c8f24fa0178bd` |
+| `M11-drop-status-error` | `test_uncertain_command_persists_and_blocks_restart` | 1 | `ea8f2e05a0a10bfbf8fb51eb02082085f8552ba3c9c9dba5dc89bcb54ca49fa1` |
+| `M11b-drop-log-error` | `test_logs_starts_and_reason_changes_only` | 1 | `5cd8ac47e1ecb738090eded88a93788efd7b0666a3903686e884c3d4fd8da6a0` |
+| `M12-bypass-sanitizer` | `test_uncertain_command_persists_and_blocks_restart` | 1 | `96844f64e496f4fb08b33402a1946aa71498da557aa2511908ba420cbd0a3bf2` |
+| `M13-hardcode-alert-delay` | `test_configured_alert_threshold_controls_runtime_observation` | 1 | `2cb28301dcba9ab84901620f1e765ec8c3b06c6bd47ddb476cd03578282de208` |
+| `M13b-hardcode-notify-config` | `test_configured_alert_threshold_controls_runtime_observation` | 1 | `00a266f43f8890a7524edd09cd13a670f6f84028a429792307ed09964c5fb43d` |
+| `M14-threshold-exclusive` | `test_threshold_boundary_details_changes_and_restart_are_one_incident` | 1 | `11cf0bbc1f2dc11f3d60d4470dfcbac569154af3f81dcdbd60455bf9694cafc0` |
+| `M15-remove-one-shot` | `test_threshold_boundary_details_changes_and_restart_are_one_incident` | 1 | `c00a10bd9188129db03a3277dba12c8fd7a36d46c0e12609f2db8b11c31b4381` |
+| `M16-alert-nonstuck` | `test_normal_status_resets_incident_and_nonstuck_reasons_never_alert` | 1 | `33dec4a2c073f9ef97c197b2f8658816ce7baac3f35fd45ec465406d611d1209` |
+| `M17-alert-acks-pending` | `test_callback_failure_is_attempted_once_and_malformed_state_is_fail_safe` | 1 | `55ce12fef897323e19d514a55273c061e105f9894fa71a4c40f1053a8879bca9` |
+| `M18-interpolate-applescript` | `test_darwin_notifier_uses_static_argv_no_shell_and_spec_timeout` | 1 | `b92fab9458eafcff092d666bea746c19fdd8d277a32d349203787e201c2ba727` |
+| `M18b-drop-pre-notify-log` | `test_darwin_notifier_uses_static_argv_no_shell_and_spec_timeout` | 1 | `35d19c9a126a2803547d510aec5d49b4ee155564d2d028715a29bc47c81615a0` |
+| `M19-accept-duplicate-prior-pid` | `test_finishing_worker_requires_board_profile_unique_pid_and_every_marker` | 1 | `d9a268ca5ab6e2e44d6eedf5f010532048da032805cd22939248ffe3d8ba0e7e` |
+| `M19-reset-on-detail-change` | `test_threshold_boundary_details_changes_and_restart_are_one_incident` | 1 | `f97b0838801debd6b01da2a723db46b47d7da66c556f323bdf7057a343787e5e` |
+| `M20-malformed-state-crashes` | `test_callback_failure_is_attempted_once_and_malformed_state_is_fail_safe` | 1 | `3cfb743d32fa2c3cbb1d1958fa77cd0852d65167927d3e973b32f8b27d293dca` |
+| `M21-hardcode-notifier-timeout` | `test_notification_timeout_logs_fallback_once` | 1 | `38701e04cbf25ff3e19afb2240364f5209b3a62962b8cd1274c9ce9a0d377615` |
+| `M22-omit-finishing-drain` | `test_stopping_waits_for_finishing_worker_then_exits` | 1 | `cd3fe08d936269c061a05443ed820b1035644b6a074021b98978afc3ce906905` |
+| `M23-rewrite-legacy-pending` | `test_legacy_pending_gets_safe_fallback_without_rewrite` | 1 | `c4cb77b78fd1466d7e71b210f2c4f9f8f68e7af178473fe8c9534e19c1ba1f0c` |
+| `M24-ignore-config-alert` | `test_alert_delay_defaults_and_configured_value_reach_runtime_spec` | 1 | `559055dcba1a504f871db52d92f5ab9ae5d80ceb55115686aafcd7385bc604a1` |
+| `M25-change-alert-default` | `test_alert_delay_defaults_and_configured_value_reach_runtime_spec` | 1 | `2fa19d91d6063fd95326bd4249a8e8f9e99d85cf442352c27f8dc53ac4a18293` |
+| `M26-change-notify-default` | `test_alert_delay_defaults_and_configured_value_reach_runtime_spec` | 1 | `dba2604ba8a598c4b958bcaae9fc07dc01891810b78ef167eae1ff32474cbb52` |
+| `M27-ignore-clock-regression` | `test_backwards_clock_resets_future_incident_start` | 1 | `069389f58ab5dee396e0815da3abf02bedebcb259e252f0c4f0851203fd8eaa0` |
+
+Green gates before freeze: macOS 242 run / 239 pass / 0 fail / 3 expected skips; Linux (immutable `python@sha256:2f17fc044b579bab302c2e8054d3a686e2cb9a83de48e70534b94cd8ebbe06a9`, `psutil==7.2.2`, `PyYAML==6.0.3`) 242 run / 239 pass / 0 fail / 3 expected skips. Two ordinary-suite skips are the mandatory pinned-source contract tests, which passed 2/2 separately on macOS against Hermes `0e0a29ad315da6b6fd5b63e2903600af85e839e5`; the third is the exact-archive old-reader test, which passed 1/1 separately against archive SHA-256 `5709b8ccd7a6125ec2c52c76711a6553afef65344d26e4f18feb672885265bef`. Compileall and plist lint passed.
 
 ## Open activation/release requirements
 

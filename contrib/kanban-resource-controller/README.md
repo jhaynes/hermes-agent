@@ -12,6 +12,9 @@ This standalone Python helper gates automatic Kanban admission without changing 
 - Perform at most one mutating command in a recovered eligibility window: one decomposition or one dispatch. Read-only dry runs do not count. Every attempted mutating command consumes the window.
 - Predict each board with supported `dispatch --dry-run --max <m>` and run the one real dispatch with the same fenced `m = min(effective board cap, Hermes database running count + 1)`. Normal operation leaves one slot. Completion races may report extras, accepted only after exact task/run/worker reconciliation and post-command cap verification.
 - Persist a pending journal before command launch. Timeout, output drift, nonzero exit, launch failure, or post-command disagreement remains an operator hold across restart.
+- A worker that ends in Hermes while its process is still exiting remains countable only when the immediately preceding successful capture, the current process fingerprint/argv/environment, and the exact retained ended `task_runs` row all agree. A fresh controller has no prior identity and holds fail-closed.
+- Every uncertain command path stores one sanitized, single-line, 300-character `{type,message}` diagnostic in the pending journal and status; transition logs carry the same bounded cause.
+- `controller.json.alerting` configures the stuck delay and notification timeout, with both defaults declared once in `spec.py`. Each unbroken `uncertain-outcome` or `persistent-operator-hold` incident gets at most one notification attempt: the controller records the attempt, writes the guaranteed `controller.log` line, then tries local Notification Center on macOS. Alerting never acknowledges uncertainty or resumes admission.
 - Refuse active behavior unless the effective default config is explicitly compatible, including `dispatch_in_gateway: false`, Hermes host cap equal to the controller host cap, Hermes global profile cap equal to the largest effective controller profile cap, an explicit nonempty `dispatch_profiles` registry, orphan reconciliation on, and stale timeout 0.
 - Any null/blank notification owner on any board is an activation hold. Historical zero counts are not cached or promised.
 
@@ -19,6 +22,7 @@ This standalone Python helper gates automatic Kanban admission without changing 
 
 - `resource_controller/`: standalone implementation; no imports from Hermes internals.
 - `resource_controller/telemetry/`: per-OS memory/pressure backend (`darwin.py`, `linux.py`), the shared `MemoryHealth`/`TelemetryError` contract, and named constants (`__init__.py`, `constants.py`).
+- `resource_controller/alerting.py`: durable at-most-one-attempt stuck-incident tracking, independent of command journals.
 - `tests/`: deterministic serial unit/contract tests.
 - `controller.example.json`: uninstalled runtime configuration template.
 - `launchd/ai.hermes.kanban-resource-controller.plist`: uninstalled template only.

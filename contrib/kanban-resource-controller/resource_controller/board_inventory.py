@@ -4,15 +4,32 @@ from dataclasses import dataclass
 from pathlib import Path
 import sqlite3
 import stat
-from typing import Mapping
+from typing import Mapping, Sequence
 from urllib.parse import quote
 
-from .inventory import CanonicalRun
-from .worker_identity import IdentityHold, require_consistent
+from .inventory import CanonicalRun, LiveWorker
+from .worker_identity import (
+    IdentityHold,
+    StoredFingerprint,
+    parse_stored_fingerprint,
+    require_consistent,
+)
 
 
 class BoardInventoryError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class EndedRunIdentity:
+    board: str
+    task_id: str
+    run_id: int
+    profile: str
+    pid: int
+    worker_fingerprint: StoredFingerprint
+    run_status: str
+    ended_at: int
 
 
 @dataclass(frozen=True)
@@ -22,6 +39,7 @@ class BoardSnapshot:
     assignees: Mapping[str, str | None]
     statuses: Mapping[str, str]
     runs: tuple[CanonicalRun, ...]
+    ended_runs: tuple[EndedRunIdentity, ...]
     hermes_db_running_count: int
     unowned_subscriptions: int
 
@@ -31,14 +49,30 @@ _REQUIRED_COLUMNS = {
         "id", "title", "assignee", "status", "priority", "created_at",
         "worker_pid", "worker_started_at", "current_run_id"
     },
-    "task_runs": {"id", "task_id", "profile", "status"},
+    "task_runs": {
+        "id", "task_id", "profile", "status", "worker_pid", "worker_started_at", "ended_at",
+    },
     "kanban_notify_subs": {"task_id", "notifier_profile"},
 }
 
 
-def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> BoardSnapshot:
+def read_board_inventory(
+    path: Path,
+    *,
+    board: str,
+    max_rows: int = 10_000,
+    ended_candidates: Sequence[LiveWorker] = (),
+) -> BoardSnapshot:
     if max_rows <= 0:
         raise BoardInventoryError("row bound must be positive")
+    candidate_keys = [
+        (item.board, item.task_id, item.run_id, item.pid, item.profile)
+        for item in ended_candidates
+    ]
+    if len(candidate_keys) > max_rows:
+        raise BoardInventoryError("ended candidate row bound exceeded")
+    if len(set(candidate_keys)) != len(candidate_keys):
+        raise BoardInventoryError("duplicate ended candidate")
     if path.is_symlink():
         raise BoardInventoryError("board database must not be a symlink")
     try:
@@ -74,6 +108,12 @@ def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> B
         if len(run_rows) > max_rows:
             raise BoardInventoryError("active run row bound exceeded")
         runs = tuple(_canonical_run(row, board) for row in run_rows)
+        ended_runs = tuple(
+            ended
+            for candidate in ended_candidates
+            if candidate.board == board
+            for ended in _ended_identity(connection, board, candidate)
+        )
         hermes_db_running_count = int(
             connection.execute("SELECT COUNT(*) FROM tasks WHERE status = 'running'").fetchone()[0]
         )
@@ -97,9 +137,46 @@ def read_board_inventory(path: Path, *, board: str, max_rows: int = 10_000) -> B
         assignees={row["id"]: row["assignee"] for row in candidates},
         statuses={row["id"]: row["status"] for row in candidates},
         runs=runs,
+        ended_runs=ended_runs,
         hermes_db_running_count=hermes_db_running_count,
         unowned_subscriptions=unowned,
     )
+
+
+def _ended_identity(
+    connection: sqlite3.Connection,
+    board: str,
+    candidate: LiveWorker,
+) -> tuple[EndedRunIdentity, ...]:
+    rows = connection.execute(
+        "SELECT id, task_id, profile, status, worker_pid, worker_started_at, ended_at "
+        "FROM task_runs WHERE id = ? AND task_id = ? AND worker_pid = ? "
+        "AND worker_started_at IS NOT NULL AND ended_at IS NOT NULL",
+        (candidate.run_id, candidate.task_id, candidate.pid),
+    ).fetchall()
+    if not rows:
+        return ()
+    if len(rows) != 1:
+        raise BoardInventoryError(f"duplicate ended identity for {candidate.task_id}/{candidate.run_id}")
+    row = rows[0]
+    if row["profile"] != candidate.profile or row["worker_started_at"] != candidate.worker_fingerprint:
+        raise BoardInventoryError(f"ended identity mismatch for {candidate.task_id}/{candidate.run_id}")
+    try:
+        fingerprint = parse_stored_fingerprint(
+            row["worker_started_at"], context=f"{candidate.task_id}/{candidate.run_id}",
+        )
+    except IdentityHold as exc:
+        raise BoardInventoryError(f"ended identity invalid for {candidate.task_id}/{candidate.run_id}: {exc}") from exc
+    return (EndedRunIdentity(
+        board=board,
+        task_id=row["task_id"],
+        run_id=int(row["id"]),
+        profile=row["profile"],
+        pid=int(row["worker_pid"]),
+        worker_fingerprint=fingerprint,
+        run_status=row["status"],
+        ended_at=int(row["ended_at"]),
+    ),)
 
 
 def _validate_schema(connection: sqlite3.Connection) -> None:

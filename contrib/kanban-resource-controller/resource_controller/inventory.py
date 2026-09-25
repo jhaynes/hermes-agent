@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import re
-from typing import Mapping, Sequence
+from typing import Mapping, Protocol, Sequence
 
 from .spec import AdmissionCaps
 from .worker_identity import IdentityHold, StoredFingerprint, matches
@@ -95,6 +95,16 @@ class LiveWorker:
     worker_fingerprint: str = ""
 
 
+class EndedRunLike(Protocol):
+    board: str
+    task_id: str
+    run_id: int
+    profile: str
+    pid: int
+    worker_fingerprint: StoredFingerprint
+    run_status: str
+
+
 @dataclass(frozen=True)
 class Capacity:
     available: bool
@@ -109,6 +119,8 @@ def reconcile_workers(
     processes: Sequence[ProcessSnapshot],
     *,
     epoch: str = "",
+    ended_runs: Sequence[EndedRunLike] = (),
+    previous_workers: Sequence[LiveWorker] = (),
 ) -> list[LiveWorker]:
     by_pid: dict[int, CanonicalRun] = {}
     identities: set[tuple[int, str]] = set()
@@ -120,6 +132,18 @@ def reconcile_workers(
             raise IdentityHold("duplicate process identity")
         identities.add(identity)
         by_pid[run.pid] = run
+
+    previous_by_pid: dict[int, LiveWorker] = {}
+    for worker in previous_workers:
+        if worker.pid in previous_by_pid:
+            raise IdentityHold(f"duplicate previous pid {worker.pid}")
+        previous_by_pid[worker.pid] = worker
+    ended_by_key = {
+        (run.board, run.task_id, run.run_id, run.pid, run.profile): run
+        for run in ended_runs
+    }
+    if len(ended_by_key) != len(ended_runs):
+        raise IdentityHold("duplicate ended run identity")
 
     matched: set[int] = set()
     workers: list[LiveWorker] = []
@@ -135,7 +159,23 @@ def reconcile_workers(
             raise IdentityHold(f"worker process {process.pid} is inaccessible")
         run = by_pid.get(process.pid)
         if run is None:
-            raise IdentityHold(f"worker process {process.pid} has no canonical run")
+            previous = previous_by_pid.get(process.pid)
+            if previous is None:
+                raise IdentityHold(f"worker process {process.pid} has no canonical run")
+            ended = ended_by_key.get((
+                previous.board, previous.task_id, previous.run_id, previous.pid, previous.profile,
+            ))
+            if ended is None or ended.worker_fingerprint.raw != previous.worker_fingerprint:
+                raise IdentityHold(f"worker process {process.pid} has no exact ended run")
+            run = CanonicalRun(
+                ended.board,
+                ended.task_id,
+                ended.run_id,
+                ended.pid,
+                ended.worker_fingerprint,
+                ended.profile,
+                ended.run_status,
+            )
         if process.pid in matched:
             raise IdentityHold(f"duplicate process snapshot {process.pid}")
         if process.start_fingerprint is None:
