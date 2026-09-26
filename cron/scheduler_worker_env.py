@@ -1,6 +1,8 @@
 """Cron: import path of the restart-safe external worker.
 
-The worker is spawned as ``sys.executable -m cron.scheduler``. Its entry module is
+The worker is spawned through ``hermes_child_argv``: the install's runtime command on a
+PM-managed install (which supplies the dependency generation), otherwise
+``sys.executable -m cron.scheduler``. Its entry module is
 ``cron.scheduler``, not ``hermes_cli.main``, so nothing bootstraps the gateway's checkout
 onto its ``sys.path``; historically it imported ``cron`` only through the implicit ``-m``
 cwd entry. That entry is gone under ``PYTHONSAFEPATH`` and useless when the venv's
@@ -16,8 +18,11 @@ site-packages, dropped venv markers) stand.
 from __future__ import annotations
 
 import os
+import sys
 import sysconfig
 from pathlib import Path
+
+from hermes_cli._launchers import resolve_store_python, runtime_command
 
 
 def _installed_purelib() -> Path | None:
@@ -25,6 +30,22 @@ def _installed_purelib() -> Path | None:
         return Path(sysconfig.get_paths()["purelib"]).resolve()
     except (KeyError, OSError):
         return None
+
+
+def hermes_child_argv(module: str, args: list[str]) -> list[str]:
+    """Argv for a Hermes-owned child running ``module`` from this install.
+
+    On a PM-managed install ``sys.executable`` is the bare store Python: the gateway has its
+    dependencies only because the launcher bootstrap put them on ``sys.path``, so a
+    ``sys.executable -m`` child dies with ``No module named 'ruamel'``. The install's runtime
+    command re-runs that bootstrap in the child. Elsewhere (developer venv, wheel/pipx) the
+    interpreter carries its own packages and the legacy shape stays.
+    """
+    repo_root = Path(__file__).resolve().parent.parent
+    store_python = resolve_store_python(repo_root)
+    if store_python is not None:
+        return runtime_command(repo_root, args, module=module, python=store_python)
+    return [sys.executable, "-m", module, *args]
 
 
 def pin_hermes_tree_on_pythonpath(worker_env: dict, repo_root: Path) -> dict:
