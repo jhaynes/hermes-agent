@@ -71,7 +71,7 @@ def test_deep_merge_partial_block_over_defaults(tmp_path, monkeypatch):
     assert block["cpu_psi_hold"] == DEFAULTS["cpu_psi_hold"]
     assert block["min_running"] == DEFAULTS["min_running"]
 
-    parsed = ka.parse_admission_settings(cfg)
+    parsed = ka.parse_admission_settings(cfg.get("kanban") or {})
     assert parsed.mode == "enforce"
     assert parsed.step == 3
     assert parsed.settle_seconds == 5.0

@@ -83,7 +83,12 @@ class Harness:
 
         monkeypatch.setattr(kwatch.time, "monotonic", self.clock.monotonic)
         monkeypatch.setattr(kwatch.asyncio, "sleep", self.clock.sleep)
-        monkeypatch.setattr(kwatch, "_live_kanban_config", lambda: self.config)
+        # _live_kanban_config is a mixin method; patch it on the CLASS so the
+        # instance created below sees the fake. It must return the KANBAN
+        # block (the real method extracts it from the full config).
+        monkeypatch.setattr(
+            kwatch.GatewayKanbanWatchersMixin, "_live_kanban_config",
+            lambda self: self.config.get("kanban") or {})
         monkeypatch.setattr(
             kwatch, "_kanban_dispatch_allowed", lambda: not self.paused)
 
@@ -92,9 +97,18 @@ class Harness:
 
         monkeypatch.setattr(ka, "read_host_signals", fake_signals)
 
-        # The runner: a bare mixin instance whose _running we can flip.
+        # host_running must be a stable number ≥ min_running so the liveness
+        # override never fires in these loop tests (it's covered separately
+        # in test_kanban_admission.py T8/T9).
+        import hermes_cli.kanban_db_dispatch as kbd_mod
+
+        monkeypatch.setattr(kbd_mod, "count_running_tasks_all_boards", lambda: 5)
+
+        # The runner: a bare mixin instance whose _running we can flip, with
+        # the harness config attached for the patched _live_kanban_config.
         runner = object.__new__(kwatch.GatewayKanbanWatchersMixin)
         runner._running = True
+        runner.config = self.config
         self.runner = runner
 
         # The controller + dispatcher the loop drives.
@@ -129,15 +143,19 @@ class Harness:
 
         # Stop the loop after the fake clock passes a deadline: the helper
         # loops until next_full, so flip _running off from inside sleep.
+        # NOTE: kwatch.asyncio.sleep is the seam the loop calls; rebind BOTH
+        # it and the clock so test-local clamps compose with this one.
+        harness = self
         orig_sleep = self.clock.sleep
         self.deadline = 160.0
 
         async def clamped_sleep(seconds):
             await orig_sleep(seconds)
             if harness.clock.now >= harness.deadline:
-                runner._running = False
+                harness.runner._running = False
 
         self.clock.sleep = clamped_sleep
+        kwatch.asyncio.sleep = clamped_sleep
 
     async def run(self):
         await self.runner._inter_tick_wait(
@@ -210,10 +228,11 @@ def test_t27_mode_switch_takes_effect_within_settle(monkeypatch):
         await orig_sleep(seconds)
         if h.clock.now >= 103.0 and h.config["kanban"]["adaptive_admission"]["mode"] == "off":
             h.config["kanban"]["adaptive_admission"]["mode"] = "enforce"
-        if h.clock.now >= 160.0:
-            h.runner._running = False
 
+    # Rebind the seam the loop actually calls, composing with the harness
+    # deadline clamp (which still owns flipping _running at 160).
     h.clock.sleep = clamped
+    kwatch.asyncio.sleep = clamped
     asyncio.run(h.run())
 
     assert h.spawn_calls, "enforce must begin spawning after the switch"
@@ -237,18 +256,20 @@ def test_t20a_mode_switch_to_off_stops_sub_passes_live(monkeypatch):
         if h.clock.now >= 103.0 and switched["at"] is None:
             switched["at"] = h.clock.now
             h.config["kanban"]["adaptive_admission"]["mode"] = "off"
-        if h.clock.now >= 160.0:
-            h.runner._running = False
 
+    # Rebind the seam the loop actually calls (deadline clamp stays armed).
     h.clock.sleep = clamped
+    kwatch.asyncio.sleep = clamped
     asyncio.run(h.run())
 
-    after = [c for c in h.spawn_calls if c["at"] > switched["at"]]
-    assert after == [], "no sub-pass or allowance after the off switch"
-    # The pre-switch sub-pass DID run (checked at 105 or earlier... within one
-    # settle of the switch).
-    before = [c for c in h.spawn_calls if c["at"] <= switched["at"]]
-    assert before, "the enforce period must have sub-passed"
+    # The switch lands mid-sleep at 103; the check already past its mode gate
+    # at 100 may still sub-pass (within one settle — that IS the contract).
+    # From the first check that READ the new mode onward: nothing.
+    first_post_switch_check = switched["at"] + 5.0  # next check reads >= 105
+    after = [c for c in h.spawn_calls if c["at"] >= first_post_switch_check]
+    assert after == [], "no sub-pass after the first post-switch check"
+    assert h.spawn_calls, "the enforce period must have sub-passed"
+    assert h.spawn_calls[-1]["at"] <= 105.0
 
 
 def test_t20a_ceiling_restart_pending_reported(monkeypatch):
@@ -326,10 +347,10 @@ def test_t30_latch_blocks_until_fingerprint_change(monkeypatch):
         await orig_sleep(seconds)
         if h.clock.now >= 112.0 and fp_version["v"] == 0:
             fp_version["v"] = 1
-        if h.clock.now >= 160.0:
-            h.runner._running = False
 
+    # Rebind the seam the loop actually calls (deadline clamp stays armed).
     h.clock.sleep = clamped
+    kwatch.asyncio.sleep = clamped
     asyncio.run(h.run())
 
     sub_passes = [c for c in spawn_calls if c["admission_only"]]

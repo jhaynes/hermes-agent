@@ -18,14 +18,11 @@ def test_public_alias_is_the_private_function():
 
 
 def test_worker_bound_capped_at_4gib(monkeypatch, tmp_path):
-    """A huge host still bounds each worker at 4 GiB."""
+    """A huge host still bounds each worker at 4 GiB: min(64 GiB cgroup,
+    8 GiB phys/2, 4 GiB cap) = 4 GiB."""
     from tools import process_registry as pr
 
-    monkeypatch.setattr(Path, "read_text", lambda self, **k: "0::/\n")
-    monkeypatch.setattr(
-        Path, "stat", lambda self: type("S", (), {"st_mtime_ns": 0})(), raising=False)
-    # /sys/fs/cgroup/<relative>/memory.max read is patched via read_text: the
-    # FIRST read is /proc/self/cgroup ("0::/"), the second is memory.max.
+    # The FIRST read is /proc/self/cgroup ("0::/"), the second is memory.max.
     reads = iter(["0::/\n", str(64 * 1024**3)])
 
     def fake_read(self, encoding=None, **k):
@@ -34,7 +31,8 @@ def test_worker_bound_capped_at_4gib(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "read_text", fake_read)
     monkeypatch.setattr(
         pr.os, "sysconf", lambda name: {
-            "SC_PHYS_PAGES": 1024**2, "SC_PAGE_SIZE": 4096}[name])
+            # 16 GiB physical: half = 8 GiB, above the 4 GiB cap.
+            "SC_PHYS_PAGES": (16 * 1024**3) // 4096, "SC_PAGE_SIZE": 4096}[name])
     assert pr.worker_memory_max_bytes() == 4 * 1024**3
 
 

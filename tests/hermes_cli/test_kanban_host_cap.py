@@ -475,7 +475,7 @@ def test_t17_run_daemon_prints_static_note_when_mode_not_off(
     monkeypatch.setattr(
         ka, "live_admission_settings",
         lambda: ka.parse_admission_settings(
-            {"kanban": {"adaptive_admission": {"mode": "enforce"}}}),
+            {"adaptive_admission": {"mode": "enforce"}}),
     )
     kbd.run_daemon(interval=0.01, stop_event=stop, on_tick=lambda res: stop.set())
 

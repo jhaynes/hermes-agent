@@ -446,29 +446,35 @@ class GatewayKanbanWatchersMixin:
         from hermes_cli import kanban_admission as _ka
         from hermes_cli import kanban_db_dispatch as _kbd
 
+        # The schedule is anchored to DECISION times (§5.2): the first check
+        # is one settle after the full tick (the full tick itself was the
+        # interval's first decision point), and each subsequent check is one
+        # LIVE settle after the previous check. Re-reading settings at every
+        # check is what makes off -> enforce land within one settle (MoA B3).
         t_full = time.monotonic()
-        next_check = t_full
+        next_full = t_full + max(interval, 1.0)
+        next_check: Optional[float] = None  # set from the LIVE settle below
         latches: dict = {"nothing_admissible": False, "fingerprints": None}
 
         while self._running:
-            now = time.monotonic()
-            next_full = t_full + max(interval, 1.0)
-            if now >= next_full:
+            if time.monotonic() >= next_full:
                 return
-            # Sleep in 1 s slices until the next check point (stop() never
-            # waits a full interval).
-            while self._running and time.monotonic() < min(next_full, next_check) - 0.0:
-                slice_to = min(next_full, next_check) - time.monotonic()
+            live = _ka.parse_admission_settings(self._live_kanban_config())
+            if next_check is None:
+                next_check = t_full + live.settle_seconds
+            # Sleep in 1 s slices to the next check (or the full tick,
+            # whichever comes first) so stop() never waits a full settle.
+            wake_at = min(next_full, next_check)
+            while self._running and time.monotonic() < wake_at:
+                slice_to = wake_at - time.monotonic()
                 if slice_to <= 0:
                     break
                 await asyncio.sleep(min(1.0, slice_to))
             if not self._running or time.monotonic() >= next_full:
                 return
+            # This check's decision time anchors the next one.
+            next_check = time.monotonic() + live.settle_seconds
 
-            live = _ka.parse_admission_settings(self._live_kanban_config())
-            # Re-derive the next check from the LIVE settle: an edit applies
-            # from the next check (§5.2 rules).
-            next_check = next_check + live.settle_seconds if next_check > t_full else t_full + live.settle_seconds
             if live.mode != "enforce" or not _kanban_dispatch_allowed():
                 continue
             if latches["nothing_admissible"]:
@@ -476,6 +482,7 @@ class GatewayKanbanWatchersMixin:
                     dispatcher.board_fingerprints)
                 if fingerprints == latches["fingerprints"]:
                     continue
+                # A board changed: re-arm and fall through to probe + decide.
                 latches["nothing_admissible"] = False
                 latches["fingerprints"] = None
             if not await _to_thread_process_service(dispatcher.host_has_admissible_work):

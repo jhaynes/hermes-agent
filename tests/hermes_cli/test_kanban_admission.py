@@ -71,6 +71,13 @@ def controller(**cfg):
     return ka.AdmissionController(settings(**cfg))
 
 
+@pytest.fixture(autouse=True)
+def _pin_worker_bound(monkeypatch):
+    """Deterministic headroom floor: a 4 GiB per-worker bound on a 62 GiB host
+    -> 16 GiB floor (the tower shape from plan §5.5)."""
+    monkeypatch.setattr(ka, "_worker_bound_cached", lambda: 4 * GIB)
+
+
 def floor_gib(worker_bound_gib=4, mem_total_gib=62.5):
     return ka.headroom_floor_bytes(
         settings(), int(worker_bound_gib * GIB), int(mem_total_gib * GIB)
@@ -162,7 +169,7 @@ def test_t1_delayed_spawn_row_window_stamped_at_decision():
                    ceiling=64, host_running=0)
     ctl.record(d.now, 1)  # n=1, spawn "completes" at 201.1 — not recorded
     nxt = ctl.decide(now=205.0, signals=signals(), settings=settings(),
-                     ceiling=64, host_running=1)
+                     ceiling=64, host_running=5)
     assert nxt.allowance == 2, "grant must pace from the decision, not completion"
 
 
@@ -192,12 +199,12 @@ def test_t14_fresh_controller_grants_exactly_step():
 def test_t3_cpu_hold_alone_is_amber_without_cooldown():
     ctl = controller()
     d = ctl.decide(now=100.0, signals=signals(cpu_psi=30.0), settings=settings(),
-                   ceiling=64, host_running=1)
+                   ceiling=64, host_running=5)
     assert (d.level, d.allowance) == ("AMBER", 0)
     assert d.trigger == "cpu_psi"
     # No cooldown started: GREEN at +1s still grants.
     d2 = ctl.decide(now=101.0, signals=signals(), settings=settings(),
-                    ceiling=64, host_running=1)
+                    ceiling=64, host_running=5)
     assert d2.allowance == 2
 
 
@@ -206,11 +213,11 @@ def test_t3_headroom_floor_alone_is_amber():
     # Floor is 16 GiB on the tower shape; 16 GiB - 1 byte holds.
     sig = signals(mem_avail=16 * GIB - 1)
     d = ctl.decide(now=100.0, signals=sig, settings=settings(),
-                   ceiling=64, host_running=1)
+                   ceiling=64, host_running=5)
     assert (d.level, d.allowance, d.trigger) == ("AMBER", 0, "headroom")
     # Exactly at the floor does NOT hold (floor is a strict-below threshold).
     d2 = ctl.decide(now=100.5, signals=signals(mem_avail=16 * GIB),
-                    settings=settings(), ceiling=64, host_running=1)
+                    settings=settings(), ceiling=64, host_running=5)
     assert d2.level == "GREEN"
 
 
@@ -223,19 +230,19 @@ def test_t4_each_red_signal_alone():
     for label, sig, trigger in cases:
         ctl = controller()
         d = ctl.decide(now=100.0, signals=sig, settings=settings(),
-                       ceiling=64, host_running=1)
+                       ceiling=64, host_running=5)
         assert (d.level, d.allowance) == ("RED", 0), label
         assert d.trigger == trigger, label
         # Cooldown started: GREEN 1s later is still held.
         d2 = ctl.decide(now=101.0, signals=signals(), settings=settings(),
-                        ceiling=64, host_running=1)
+                        ceiling=64, host_running=5)
         assert d2.allowance == 0 and d2.reason == "cooldown", label
 
 
 def test_t4b_memory_psi_is_recorded_not_control():
     ctl = controller()
     d = ctl.decide(now=100.0, signals=signals(mem_psi=100.0),
-                   settings=settings(), ceiling=64, host_running=1)
+                   settings=settings(), ceiling=64, host_running=5)
     assert d.level == "GREEN"
     assert d.allowance == 2
     assert d.signals["mem_psi"] == 100.0
@@ -249,26 +256,26 @@ def test_t4b_memory_psi_is_recorded_not_control():
 def test_t5_cooldown_blocks_then_clears():
     ctl = controller()
     ctl.decide(now=100.0, signals=signals(cpu_psi=80.0), settings=settings(),
-               ceiling=64, host_running=1)
+               ceiling=64, host_running=5)
     # GREEN inside 10s cooldown -> 0, reason cooldown.
     d = ctl.decide(now=108.0, signals=signals(), settings=settings(),
-                   ceiling=64, host_running=1)
+                   ceiling=64, host_running=5)
     assert (d.allowance, d.reason) == (0, "cooldown")
     # At cooldown expiry -> step again.
     d2 = ctl.decide(now=110.0, signals=signals(), settings=settings(),
-                    ceiling=64, host_running=1)
+                    ceiling=64, host_running=5)
     assert d2.allowance == 2
 
 
 def test_t5_cooldown_uses_red_timestamp_not_decide_time():
     ctl = controller()
     ctl.decide(now=100.0, signals=signals(cpu_psi=80.0), settings=settings(),
-               ceiling=64, host_running=1)
+               ceiling=64, host_running=5)
     # A second RED later moves the cooldown anchor forward.
     ctl.decide(now=104.0, signals=signals(cpu_psi=80.0), settings=settings(),
-               ceiling=64, host_running=1)
+               ceiling=64, host_running=5)
     d = ctl.decide(now=112.0, signals=signals(), settings=settings(),
-                   ceiling=64, host_running=1)
+                   ceiling=64, host_running=5)
     assert d.allowance == 0 and d.reason == "cooldown"
 
 
@@ -283,7 +290,7 @@ def test_t6_oscillation_between_hold_and_backoff_never_admits():
     for i in range(20):
         psi = 45.0 if i % 2 == 0 else 55.0
         d = ctl.decide(now=now, signals=signals(cpu_psi=psi),
-                       settings=settings(), ceiling=64, host_running=1)
+                       settings=settings(), ceiling=64, host_running=5)
         assert d.level == "AMBER" and d.allowance == 0, f"decision {i}"
         assert d.reason != "cooldown", "AMBER must not start a cooldown"
         now += 1.0
@@ -320,9 +327,12 @@ def test_t8_min_running_never_overrides_mem_level_red():
 
 def test_t8_override_grant_larger_than_step_starts_window():
     ctl = controller()
-    d = ctl.decide(now=100.0, signals=signals(cpu_psi=90.0),
+    # Headroom AMBER (not RED): the override lifts WITHOUT arming the cooldown,
+    # isolating the pacing window the override grant must start.
+    sig = signals(mem_avail=8 * GIB)
+    d = ctl.decide(now=100.0, signals=sig,
                    settings=settings(min_running=5), ceiling=64, host_running=1)
-    assert d.allowance == 4
+    assert d.level == "AMBER" and d.allowance == 4
     ctl.record(d.now, 4)
     d2 = ctl.decide(now=101.0, signals=signals(), settings=settings(),
                     ceiling=64, host_running=5)
@@ -354,7 +364,7 @@ def _inactive(case):
         raise AssertionError(case)
     ceiling = None if case == "ceiling None" else 64
     return ctl.decide(now=100.0, signals=sig, settings=settings(),
-                      ceiling=ceiling, host_running=1)
+                      ceiling=ceiling, host_running=5)
 
 
 @pytest.mark.parametrize("case", ["cpu_psi None", "mem_avail None", "ceiling None"])
@@ -371,7 +381,7 @@ def test_t10_mem_total_missing_with_mem_avail_present_is_inactive():
     ctl = controller()
     sig = signals(mem_total=None)
     d = ctl.decide(now=100.0, signals=sig, settings=settings(),
-                   ceiling=64, host_running=1)
+                   ceiling=64, host_running=5)
     assert d.allowance is None
     assert d.reason == "admission_inactive:mem_total"
 
@@ -381,7 +391,7 @@ def test_t11_macos_shaped_signals_inactive():
     sig = ka.HostSignals(cpu_psi=None, mem_psi=None, mem_avail_bytes=None,
                          mem_total_bytes=None, mem_level="unknown", sampled_at=None)
     d = ctl.decide(now=100.0, signals=sig, settings=settings(),
-                   ceiling=64, host_running=1)
+                   ceiling=64, host_running=5)
     assert d.allowance is None and d.level == "INACTIVE"
 
 
@@ -404,7 +414,7 @@ def _kanban_cfg(**block):
 
 def _parse(block):
     warnings: list[str] = []
-    parsed = ka.parse_admission_settings(_kanban_cfg(**block), warn=warnings.append)
+    parsed = ka.parse_admission_settings(_kanban_cfg(**block)["kanban"], warn=warnings.append)
     return parsed, warnings
 
 
@@ -417,6 +427,7 @@ def test_t12_defaults_when_block_missing():
     assert parsed.cpu_psi_hold == 30.0 and parsed.cpu_psi_backoff == 60.0
     assert parsed.headroom_min_gib == 8 and parsed.headroom_worker_multiple == 4
     assert parsed == ka.parse_admission_settings({"kanban": {}})
+    assert parsed == ka.parse_admission_settings({})
 
 
 def test_t12_boolean_mode_rejected_not_enforce():
@@ -475,12 +486,15 @@ def test_t12_min_running_range():
 
 
 def test_t12_psi_threshold_range():
+    # Warnings dedupe per distinct value process-wide; reset so each bad
+    # value in this loop is asserted to warn (an earlier test may have used it).
+    ka._WARNED_BAD_VALUES.clear()
     for key in ("cpu_psi_hold", "cpu_psi_backoff"):
         for bad in (101, -1, 1000):
             parsed, warnings = _parse({key: bad})
             base = ka.parse_admission_settings({"kanban": {}})
             assert getattr(parsed, key) == getattr(base, key), (key, bad)
-            assert warnings
+            assert warnings, (key, bad)
 
 
 def test_t12_hold_ge_backoff_reverts_both():
@@ -522,9 +536,9 @@ def test_t12_rev1_keys_ignored_with_warning():
 def test_t12_warning_once_per_distinct_bad_value():
     seen: list[str] = []
     warn = seen.append
-    ka.parse_admission_settings(_kanban_cfg(step="x"), warn=warn)
-    ka.parse_admission_settings(_kanban_cfg(step="x"), warn=warn)
-    ka.parse_admission_settings(_kanban_cfg(step="y"), warn=warn)
+    ka.parse_admission_settings(_kanban_cfg(step="x")["kanban"], warn=warn)
+    ka.parse_admission_settings(_kanban_cfg(step="x")["kanban"], warn=warn)
+    ka.parse_admission_settings(_kanban_cfg(step="y")["kanban"], warn=warn)
     # "x" warned once (second call suppressed), "y" warned once.
     assert len(seen) == 2
 
@@ -647,7 +661,7 @@ def test_t31_status_write_never_raises(tmp_path, monkeypatch):
     monkeypatch.setattr(ka, "atomic_json_write", lambda *a, **k: (_ for _ in ()).throw(OSError("boom")))
     st = ka.StatusWriter(tmp_path)
     d = controller().decide(now=100.0, signals=signals(), settings=settings(),
-                            ceiling=64, host_running=1)
+                            ceiling=64, host_running=5)
     st.record_full_tick(d, extra={})
     st.maybe_write_transition(d)
 

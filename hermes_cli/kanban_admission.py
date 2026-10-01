@@ -209,7 +209,8 @@ def live_admission_settings(
     write returns the last-known-good config, §6)."""
     from hermes_cli.config import load_config_readonly
 
-    return parse_admission_settings(load_config_readonly() or {}, warn=warn)
+    cfg = load_config_readonly() or {}
+    return parse_admission_settings(cfg.get("kanban") or {}, warn=warn)
 
 
 def live_configured_ceiling() -> Optional[int]:
