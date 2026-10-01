@@ -152,20 +152,30 @@ class DispatchResult:
     """Memory pressure that restricted this tick: ``"critical"`` (no new
     workers), ``"elevated"`` (at most one), ``None`` (no restriction).
     Reclaim/promotion bookkeeping still ran; deferred tasks stay queued."""
+    admission_hold: Optional[int] = None
+    """The adaptive-admission allowance that bound this tick, when it did:
+    ``step``-shaped budget the lanes could not exceed (plan rev2 §5.7).
+    ``None`` = no allowance was applied (today's behavior)."""
+    admission_reason: Optional[str] = None
+    """Why the allowance was what it was (e.g. ``"cooldown"``, ``"pacing"``,
+    ``"red"``, ``"admission_inactive:cpu_psi"``) — feeds
+    :func:`describe_suppression` so "held by admission" is diagnosable from
+    the stuck-worker warnings alone."""
 
 
 def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
     """One line naming why the tick(s) held ready work back, or ``""``.
 
     ``active_pr=1, recent_success=2, rate_limited=1, skipped_locked=1,
-    memory_pressure=critical`` — the respawn-guard reasons counted per task
-    plus the tick-level holds. Feeds the "dispatcher stuck" warnings of the
-    CLI daemon and the embedded gateway dispatcher, which otherwise report a
-    bare zero-spawn count while ``hermes kanban tail`` is the only place the
-    guard reason is written (#111910).
+    memory_pressure=critical, admission=cooldown`` — the respawn-guard reasons
+    counted per task plus the tick-level holds. Feeds the "dispatcher stuck"
+    warnings of the CLI daemon and the embedded gateway dispatcher, which
+    otherwise report a bare zero-spawn count while ``hermes kanban tail`` is
+    the only place the guard reason is written (#111910).
     """
     counts: dict[str, int] = {}
     pressure: Optional[str] = None
+    admission: Optional[str] = None
     for res in results:
         if res is None:
             continue
@@ -177,9 +187,13 @@ def describe_suppression(results: Iterable[Optional["DispatchResult"]]) -> str:
             counts["skipped_locked"] = counts.get("skipped_locked", 0) + 1
         if res.memory_pressure:
             pressure = res.memory_pressure
+        if res.admission_reason:
+            admission = res.admission_reason
     parts = [f"{k}={v}" for k, v in sorted(counts.items())]
     if pressure:
         parts.append(f"memory_pressure={pressure}")
+    if admission:
+        parts.append(f"admission={admission}")
     return ", ".join(parts)
 
 
@@ -1931,6 +1945,39 @@ def count_running_tasks_other_boards(board: Optional[str] = None) -> int:
     return total
 
 
+def count_running_tasks_all_boards() -> Optional[int]:
+    """Total ``running`` tasks across EVERY board, or ``None`` on any error.
+
+    Unlike :func:`count_running_tasks_other_boards` (fail-open 0, a guard
+    inside one tick), this is the adaptive controller's ``host_running``
+    input: a wrong count would mis-size the liveness floor and the
+    min-running override, so the caller must be able to SEE the failure and
+    skip the override (plan rev2 §5.7, T9). Read-only, one cheap COUNT per
+    board.
+    """
+    try:
+        boards = _kb.list_boards(include_archived=False)
+    except Exception:
+        return None
+    total = 0
+    for meta in boards:
+        if not isinstance(meta, dict):
+            continue
+        slug = meta.get("slug") or _kb.DEFAULT_BOARD
+        try:
+            other = _kbc.connect(board=slug)
+        except Exception:
+            return None
+        try:
+            total += count_running_tasks(other)
+        except Exception:
+            return None
+        finally:
+            with contextlib.suppress(Exception):
+                other.close()
+    return total
+
+
 def _memory_pressure_level(sample: Optional[Mapping[str, Any]] = None) -> str:
     """Classify system memory pressure: ok/elevated/critical/unknown.
 
@@ -1964,6 +2011,9 @@ def dispatch_once(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    spawn_allowance: Optional[int] = None,
+    admission_reason: Optional[str] = None,
+    admission_only: bool = False,
 ) -> DispatchResult:
     """Run one dispatcher tick under the board's single-writer lock.
 
@@ -1972,6 +2022,14 @@ def dispatch_once(
     frames. The loser returns an empty ``DispatchResult`` with
     ``skipped_locked=True`` and writes nothing; the lock is keyed on the
     resolved DB path so unrelated boards tick in parallel.
+
+    Adaptive admission (plan rev2 §5.2, §5.7): ``spawn_allowance`` is a
+    host-level budget that can only LOWER the spawn budget the existing
+    guards compute — the ceiling, the memory tiers, the per-profile cap and
+    the review reservation still apply on top. ``admission_only=True`` marks
+    an inter-tick sub-pass: it skips reclaim, the WAL checkpoint, the tick
+    hook and the ``respawn_guarded`` event write (the next full tick records
+    it once, as today). Defaults for both leave behavior unchanged.
     """
     def _locked_tick() -> DispatchResult:
         return _dispatch_once_locked(
@@ -1987,6 +2045,9 @@ def dispatch_once(
             default_assignee=default_assignee,
             max_in_progress_per_profile=max_in_progress_per_profile,
             reconcile_orphans=reconcile_orphans,
+            spawn_allowance=spawn_allowance,
+            admission_reason=admission_reason,
+            admission_only=admission_only,
         )
 
     try:
@@ -1994,7 +2055,8 @@ def dispatch_once(
     except Exception:
         # Must not lose the tick — fall through to an unguarded dispatch.
         result = _locked_tick()
-        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+        if not admission_only:
+            _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
         return result
     with _kbc._dispatch_tick_lock(db_path) as held:
         if not held:
@@ -2002,10 +2064,12 @@ def dispatch_once(
         else:
             result = _locked_tick()
             # Still under the dispatch lock: periodic PASSIVE WAL checkpoint.
-            _kbc._maybe_checkpoint_wal(conn, db_path)
+            if not admission_only:
+                _kbc._maybe_checkpoint_wal(conn, db_path)
     # Lock released. Fire the tick observer strictly OUTSIDE the critical
     # section: a slow subscriber must never stall a sibling dispatcher's tick.
-    _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
+    if not admission_only:
+        _kb._fire_dispatch_tick_hook(result, board=board, dry_run=dry_run)
     return result
 
 
@@ -2036,6 +2100,7 @@ def _dispatch_lane_task(
     spawn_fn,
     per_profile_cap: Optional[int],
     per_profile_running: dict[str, int],
+    record_guard_events: bool = True,
 ) -> bool:
     """Guard, claim, resolve the workspace and spawn one ready/review row.
     Returns True when a spawn slot was consumed (real or ``dry_run``); every
@@ -2074,13 +2139,10 @@ def _dispatch_lane_task(
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
-        # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
-        # operator-configured fallback exists, persist the assignment and proceed. This removes the
-        # dashboard footgun where a task created without an assignee parks in 'ready' forever even though
-        # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
-        # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
-        # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
-        if not dry_run:
+        # Admission-only sub-passes skip the write: the guard is re-checked on
+        # the next full tick, which records it once (as today) instead of one
+        # row per 5 s sub-pass (plan rev2 §5.2).
+        if record_guard_events and not dry_run:
             with _kb.write_txn(conn):
                 _kb._append_event(conn, task_id, "respawn_guarded", {"reason": guard_reason})
         return False
@@ -2212,6 +2274,7 @@ def _tick_spawn_budget(
     max_spawn: Optional[int],
     max_in_progress: Optional[int],
     board: Optional[str],
+    spawn_allowance: Optional[int] = None,
 ) -> tuple[bool, Optional[int]]:
     """``(may_spawn, spawn_budget)`` for this tick; ``budget None`` = uncapped.
 
@@ -2220,13 +2283,18 @@ def _tick_spawn_budget(
     by N every tick. ``max_in_progress`` is a HOST-level cap: running workers on
     every other board count against the same budget, else N boards multiply the
     cap by N — exactly the fan-out the memory-derived default exists to prevent.
+
+    ``spawn_allowance`` (adaptive admission, plan rev2 §5.7) is one more
+    downstream clamp in the same chain: it can only LOWER the budget. It is
+    recorded on ``result.admission_hold`` when it was the binding constraint,
+    so "held by admission" is visible from the tick result alone.
     """
     # Count already-running tasks so max_spawn enforces concurrency, not a
     # per-tick budget: "running" tasks stay running until the worker makes a terminal
     # board call (kanban_complete/kanban_block/kanban_request_review) or the TTL reclaims them.
     running_count = 0
     spawn_budget: Optional[int] = None
-    if max_spawn is not None or max_in_progress is not None:
+    if max_spawn is not None or max_in_progress is not None or spawn_allowance is not None:
         running_count = count_running_tasks(conn)
 
     # Both ready and review loops consume from the same budget.
@@ -2242,6 +2310,13 @@ def _tick_spawn_budget(
         remaining = max_in_progress - total_running
         if spawn_budget is None or spawn_budget > remaining:
             spawn_budget = remaining
+
+    # Admission allowance: host-level, applied LAST among the config-derived
+    # caps so it can only tighten them (never widen past a ceiling).
+    if spawn_allowance is not None:
+        if spawn_budget is None or spawn_budget > spawn_allowance:
+            spawn_budget = spawn_allowance
+            result.admission_hold = spawn_allowance
 
     # Memory-pressure guard: a static cap can't see the host's actual state.
     # critical -> spawn nothing this tick; elevated -> at most one new worker.
@@ -2339,19 +2414,31 @@ def _dispatch_once_locked(
     default_assignee: Optional[str] = None,
     max_in_progress_per_profile: Optional[int] = None,
     reconcile_orphans: bool = True,
+    spawn_allowance: Optional[int] = None,
+    admission_reason: Optional[str] = None,
+    admission_only: bool = False,
 ) -> DispatchResult:
     """One dispatcher tick: reclaim stale/crashed running tasks, promote
     todo -> ready, then atomically claim each spawnable ready/review row and
     call ``spawn_fn(task, workspace_path, board) -> Optional[int]``, recording
     the PID so later ticks catch crashes before the TTL. Cap semantics:
-    :func:`_tick_spawn_budget`."""
-    result = DispatchResult()
-    _run_reclaim_phase(
-        conn, result, stale_timeout_seconds=stale_timeout_seconds,
-        failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
-    )
+    :func:`_tick_spawn_budget`.
+
+    ``admission_only=True`` (plan rev2 §5.2) runs the claim/spawn lanes ONLY:
+    reclaim, promotion and their writes are skipped (skipping reclaim can
+    only OVERCOUNT ``running``, which is conservative), the respawn guard is
+    checked without writing its event, and the reason a hold applied is
+    stamped on ``result.admission_reason`` for the stuck-worker telemetry.
+    """
+    result = DispatchResult(admission_reason=admission_reason)
+    if not admission_only:
+        _run_reclaim_phase(
+            conn, result, stale_timeout_seconds=stale_timeout_seconds,
+            failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
+        )
     may_spawn, spawn_budget = _tick_spawn_budget(
-        conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
+        conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress,
+        board=board, spawn_allowance=spawn_allowance,
     )
     if not may_spawn:
         return result
@@ -2394,6 +2481,7 @@ def _dispatch_once_locked(
         dry_run=dry_run, ttl_seconds=ttl_seconds, board=board,
         failure_limit=failure_limit, spawn_fn=spawn_fn,
         per_profile_cap=per_profile_cap, per_profile_running=per_profile_running,
+        record_guard_events=not admission_only,
     )
     default_assignee = _resolve_default_assignee(default_assignee)
     spawned = 0
@@ -2996,6 +3084,26 @@ def run_daemon(
 
     if stop_event is None:
         stop_event = threading.Event()
+
+    # Adaptive admission (plan rev2 §4): the deprecated daemon path stays
+    # STATIC in v1 — no controller, no sub-pass, in every mode. One note so
+    # an operator who enabled adaptive in config knows why it doesn't apply
+    # here (and that the daemon can exceed the paced rate if run alongside
+    # the embedded dispatcher).
+    try:
+        from hermes_cli.kanban_admission import live_admission_settings
+
+        admission = live_admission_settings()
+        if admission.mode != "off":
+            print(
+                "kanban: adaptive admission is "
+                f"{admission.mode!r} but this deprecated daemon path stays "
+                "static (no pacing); the embedded gateway dispatcher owns "
+                "adaptive admission.",
+                flush=True,
+            )
+    except Exception:
+        pass
 
     def _handle(_signum, _frame):
         stop_event.set()

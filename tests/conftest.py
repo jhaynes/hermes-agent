@@ -446,6 +446,32 @@ def _neutralize_kanban_memory_guard(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _neutralize_kanban_admission_signals(request, monkeypatch):
+    """Pin the adaptive-admission host signals to "unreadable" for every test.
+
+    ``kanban_admission.read_host_signals`` reads live /proc/pressure and
+    /proc/meminfo; left un-patched, admission tests would pass or fail based
+    on how loaded the CI runner happens to be. The all-None shape is the
+    macOS/non-Linux one: the controller goes INACTIVE and the dispatcher
+    behaves exactly as before the feature existed. Tests that exercise the
+    controller pin the signals they want (or the real reader) explicitly.
+    """
+    if request.node.get_closest_marker("real_admission_signals"):
+        return
+    try:
+        from hermes_cli import kanban_admission as _ka_mod
+    except Exception:
+        return
+
+    def _no_signals():
+        return _ka_mod.HostSignals(
+            cpu_psi=None, mem_psi=None, mem_avail_bytes=None,
+            mem_total_bytes=None, mem_level="unknown", sampled_at=None)
+
+    monkeypatch.setattr(_ka_mod, "read_host_signals", _no_signals, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _neutralize_git_safe_directory_read(request, monkeypatch):
     """Skip the ``git config --get-all safe.directory`` pre-read in ``noninteractive_git_env()``.
 

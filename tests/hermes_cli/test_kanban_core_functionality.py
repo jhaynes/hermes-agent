@@ -1394,3 +1394,99 @@ def test_dead_worker_reap_reads_the_log_of_the_dispatching_board(kanban_home):
         assert "no reassignment operation" in (task.last_failure_error or "")
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Adaptive admission status in `hermes kanban stats` (plan rev2 §9, §10 T22)
+# ---------------------------------------------------------------------------
+
+
+def _write_admission_status(home, payload):
+    import json
+
+    status_path = kb.kanban_home() / "kanban" / "admission_status.json"
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(json.dumps(payload), encoding="utf-8")
+    return status_path
+
+
+def test_t22_stats_json_has_admission_block_when_mode_not_off(kanban_home, monkeypatch):
+    """`hermes kanban stats --json` includes an admission block (mode != off)."""
+    import json
+
+    from hermes_cli.kanban import _cmd_stats
+    import argparse
+
+    _write_admission_status(kanban_home, {
+        "updated_at": time.time(),
+        "mode": "shadow",
+        "level": "GREEN",
+        "allowance": 2,
+        "ceiling": 64,
+        "ceiling_configured": 32,
+        "ceiling_restart_pending": True,
+        "host_running": 5,
+        "shadow_counters": {"decisions": 12},
+    })
+    args = argparse.Namespace(json=True, board=None)
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = _cmd_stats(args)
+    assert rc == 0
+    payload = json.loads(buf.getvalue())
+    adm = payload["admission"]
+    assert adm["mode"] == "shadow"
+    assert adm["level"] == "GREEN"
+    assert adm["ceiling"] == 64
+    assert adm["ceiling_restart_pending"] is True
+    assert "age_seconds" in adm
+    assert adm["shadow_counters"]["decisions"] == 12
+
+
+def test_t22_stats_json_unchanged_when_off_or_absent(kanban_home):
+    """No status file (mode off / never written) -> no admission block, and
+    the output shape is unchanged from today."""
+    import argparse
+    import contextlib
+    import io
+    import json
+
+    from hermes_cli.kanban import _cmd_stats
+
+    args = argparse.Namespace(json=True, board=None)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = _cmd_stats(args)
+    assert rc == 0
+    payload = json.loads(buf.getvalue())
+    assert "admission" not in payload
+    assert "by_status" in payload
+
+
+def test_t22_stats_marks_stale_beyond_three_intervals(kanban_home):
+    """The block reports `stale: true` when the status file is older than
+    3 x dispatch_interval_seconds."""
+    import argparse
+    import contextlib
+    import io
+    import json
+
+    from hermes_cli.kanban import _cmd_stats
+
+    _write_admission_status(kanban_home, {
+        "updated_at": time.time() - 400,
+        "mode": "enforce",
+        "level": "GREEN",
+        "allowance": 2,
+        "ceiling": 64,
+        "host_running": 5,
+    })
+    args = argparse.Namespace(json=True, board=None)
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        _cmd_stats(args)
+    payload = json.loads(buf.getvalue())
+    assert payload["admission"]["stale"] is True

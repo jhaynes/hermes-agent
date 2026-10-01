@@ -1133,11 +1133,58 @@ def _cmd_archive(args: argparse.Namespace) -> int:
                            lambda tid: f"Archived {tid}", lambda tid: f"cannot archive {tid}")
 
 
+def _admission_status_block() -> Optional[dict]:
+    """The adaptive-admission status block for ``kanban stats --json``.
+
+    Read from ``<kanban_home>/kanban/admission_status.json`` (written by the
+    embedded dispatcher when the mode isn't ``off``). Absent or unreadable ->
+    ``None`` so the ``off`` output stays byte-for-byte today's. Adds
+    ``age_seconds`` and ``stale`` (> 3 x dispatch_interval_seconds) so an
+    operator can tell a live status file from a dead dispatcher's.
+    """
+    import json
+
+    try:
+        from hermes_cli.kanban_db import kanban_home
+
+        path = kanban_home() / "kanban" / "admission_status.json"
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict) or payload.get("mode") == "off":
+        return None
+    updated_at = payload.get("updated_at")
+    if isinstance(updated_at, (int, float)) and not isinstance(updated_at, bool):
+        age = max(0.0, time.time() - float(updated_at))
+        payload["age_seconds"] = round(age, 1)
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            interval = float(
+                ((load_config_readonly() or {}).get("kanban") or {})
+                .get("dispatch_interval_seconds", 60) or 60)
+        except Exception:
+            interval = 60.0
+        payload["stale"] = age > 3 * max(interval, 1.0)
+    else:
+        payload["age_seconds"] = None
+        payload["stale"] = True
+    return payload
+
+
 def _cmd_stats(args: argparse.Namespace) -> int:
     with kbc.connect_closing() as conn:
         stats = kb.board_stats(conn)
+    admission = _admission_status_block()
+    if admission is not None:
+        stats["admission"] = admission
     if _json_out(args, stats):
         return 0
+    if admission is not None:
+        print(f"\nAdmission: mode={admission.get('mode')} level={admission.get('level')} "
+              f"allowance={admission.get('allowance')} ceiling={admission.get('ceiling')}"
+              + (" (restart pending)" if admission.get("ceiling_restart_pending") else "")
+              + (f" [stale {admission.get('age_seconds')}s]" if admission.get("stale") else ""))
     print("By status:")
     for k in ("triage", "todo", "scheduled", "ready", "running", "blocked", "done"):
         print(f"  {k:8s}  {stats['by_status'].get(k, 0)}")

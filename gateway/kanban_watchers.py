@@ -37,6 +37,23 @@ _GC_INTERVAL_SECONDS = 3600.0
 _HEALTH_WINDOW = 6
 
 
+def _bad_tick_update(
+    ready_pending: bool,
+    any_spawned: bool,
+    spawned_since_full_tick: int,
+    bad_ticks: int,
+) -> int:
+    """Health-telemetry accumulator (plan rev2 §5.2, MoA I4).
+
+    ``bad_ticks`` counts FULL ticks only, and a full tick is not "bad" when
+    any sub-pass spawned since the previous full tick — an admission-paced
+    host where the sub-passes do the spawning must not trip the 6-tick
+    "stuck" warning.
+    """
+    any_spawned = any_spawned or bool(spawned_since_full_tick)
+    return bad_ticks + 1 if ready_pending and not any_spawned else 0
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -56,6 +73,17 @@ class GatewayKanbanWatchersMixin:
         while slept < interval and self._running:
             await asyncio.sleep(min(1.0, interval - slept))
             slept += 1.0
+
+    def _live_kanban_config(self) -> dict:
+        """``kanban`` block re-read from live config (mtime-cached loader;
+        a torn write returns the last-known-good config, plan rev2 §6)."""
+        try:
+            from hermes_cli.config import load_config_readonly
+
+            cfg = load_config_readonly() or {}
+        except Exception:
+            return {}
+        return cfg.get("kanban", {}) if isinstance(cfg, dict) else {}
 
     async def _kanban_notifier_watcher(self, interval: float = 5.0) -> None:
         """Poll ``kanban_notify_subs`` and deliver terminal events to users.
@@ -256,6 +284,13 @@ class GatewayKanbanWatchersMixin:
         tick runs :func:`kanban_db_dispatch.dispatch_once` in a thread; one tick's
         failure never stops the next. Shutdown: ``self._running`` is checked
         between ticks and the in-flight ``to_thread`` returns on its own.
+
+        Adaptive admission (plan rev2 §5.2): the inter-tick wait is
+        :meth:`_inter_tick_wait`, which between full ticks re-reads the LIVE
+        admission settings and — only in enforce mode, unpaused, with a fresh
+        admissible-work probe — runs an admission-only sub-pass with the
+        controller's allowance. ``mode: off`` keeps the helper but decides
+        nothing, so a mode switch lands within one ``settle_seconds``.
         """
         boot = self._kanban_dispatcher_boot()
         if boot is None:
@@ -269,18 +304,34 @@ class GatewayKanbanWatchersMixin:
 
         # Health telemetry (mirrors `_cmd_daemon`): warn when the ready queue
         # is non-empty but spawns are 0 for N consecutive ticks — usually a
-        # broken PATH, missing venv, or credential loss.
+        # broken PATH, missing venv, or credential loss. A full tick is not
+        # "bad" when any sub-pass spawned since the previous full tick (MoA I4).
         bad_ticks = 0
         last_warn_at = 0
         results: Optional[list] = None
         dispatcher = _KanbanDispatcher(_kb, settings)
+
+        from hermes_cli import kanban_admission as _ka
+        from hermes_cli import kanban_db_dispatch as _kbd
+
+        controller: Optional[_ka.AdmissionController] = None
+        status_writer: Optional[_ka.StatusWriter] = None
+        boot_settings = _ka.parse_admission_settings(kanban_cfg)
+        if boot_settings.mode != "off":
+            controller = _ka.AdmissionController(boot_settings)
+            status_writer = _ka.StatusWriter(_kb.kanban_home())
+            if settings.max_in_progress is None and boot_settings.mode != "off":
+                logger.warning(
+                    "kanban admission: ceiling=%s (derived; set "
+                    "kanban.max_in_progress to grow further)",
+                    settings.max_in_progress,
+                )
 
         logger.info("kanban dispatcher: embedded in gateway (interval=%.1fs)", interval)
         while self._running:
             try:
                 # Reap zombies before per-board work so a board DB failure
                 # cannot block cleanup of unrelated workers.
-                from hermes_cli import kanban_db_dispatch as _kbd
                 pids = await _to_thread_process_service(_kbd.reap_worker_zombies)
                 if pids:
                     logger.info("kanban dispatcher: reaped %d zombie worker(s), pids=%s", len(pids), pids)
@@ -293,16 +344,59 @@ class GatewayKanbanWatchersMixin:
                 if not _kanban_dispatch_allowed():
                     bad_ticks = 0
                 else:
-                    # Re-read the auto-decompose toggle live so disabling it
                     # takes effect on the next tick, not on restart.
                     _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
                     # See #49638.
                     if _ad_enabled:
                         await _to_thread_process_service(dispatcher.auto_decompose_tick, _ad_per_tick)
-                    results = await _to_thread_process_service(dispatcher.tick_once)
+
+                    # Adaptive admission: the full tick is the first decision
+                    # point of the interval (§5.2). shadow computes and records
+                    # but passes no allowance; enforce applies it.
+                    allowance: Optional[int] = None
+                    reason: Optional[str] = None
+                    if controller is not None:
+                        live = _ka.parse_admission_settings(self._live_kanban_config())
+                        if live.mode != "off":
+                            signals = await _to_thread_process_service(_ka.read_host_signals)
+                            host_running = await _to_thread_process_service(
+                                _kbd.count_running_tasks_all_boards)
+                            decision = controller.decide(
+                                time.monotonic(), signals, live,
+                                settings.max_in_progress, host_running,
+                            )
+                            reason = decision.reason
+                            if live.mode == "enforce":
+                                allowance = decision.allowance
+                            if status_writer is not None:
+                                ceiling_configured = await _to_thread_process_service(
+                                    _ka.live_configured_ceiling)
+                                status_writer.record_full_tick(decision, extra={
+                                    "pid": os.getpid(),
+                                    "mode": live.mode,
+                                    "host_running": host_running,
+                                    "shadow_counters": controller.shadow_counters(),
+                                    **_ka.status_fields(
+                                        decision,
+                                        ceiling_configured=ceiling_configured),
+                                })
+
+                    results = await _to_thread_process_service(
+                        lambda: dispatcher.tick_once(
+                            spawn_allowance=allowance,
+                            admission_reason=reason,
+                        ))
                     any_spawned = _log_spawn_results(results)
+                    spawned_total = sum(
+                        len(getattr(res, "spawned", None) or [])
+                        for _slug, res in (results or []) if res is not None
+                    )
+                    if controller is not None and allowance is not None:
+                        controller.record(time.monotonic(), spawned_total)
+                    spawned_since_full_tick = spawned_total
                     ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
-                    bad_ticks = bad_ticks + 1 if ready_pending and not any_spawned else 0
+                    bad_ticks = _bad_tick_update(
+                        ready_pending, any_spawned, spawned_since_full_tick, bad_ticks)
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                     held = _kbd.describe_suppression(res for _slug, res in (results or []))
@@ -321,6 +415,95 @@ class GatewayKanbanWatchersMixin:
             except Exception:
                 logger.exception("kanban dispatcher: unexpected watcher error")
 
-            await self._sleep_between_ticks(interval)
+            await self._inter_tick_wait(
+                controller=controller,
+                dispatcher=dispatcher,
+                interval=interval,
+            )
 
         self._release_kanban_dispatcher_lock()
+
+    async def _inter_tick_wait(
+        self,
+        *,
+        controller,
+        dispatcher: _KanbanDispatcher,
+        interval: float,
+    ) -> None:
+        """Wait between full ticks, running admission sub-passes (plan §5.2).
+
+        The schedule is anchored to DECISION times, not spawn completion: a
+        sub-pass grant paces the next sub-pass exactly like a full-tick grant.
+        Every mode uses this helper — with ``mode: off`` (or no controller) it
+        only re-reads settings at each check and never decides or spawns, so
+        switching off -> enforce takes effect within one ``settle_seconds``
+        (MoA B3 liveness).
+
+        Read order per check (§5.2): settings first (µs), then the pause gate,
+        then the admissible-work probe, then signals + host count only when a
+        sub-pass could actually spawn.
+        """
+        from hermes_cli import kanban_admission as _ka
+        from hermes_cli import kanban_db_dispatch as _kbd
+
+        t_full = time.monotonic()
+        next_check = t_full
+        latches: dict = {"nothing_admissible": False, "fingerprints": None}
+
+        while self._running:
+            now = time.monotonic()
+            next_full = t_full + max(interval, 1.0)
+            if now >= next_full:
+                return
+            # Sleep in 1 s slices until the next check point (stop() never
+            # waits a full interval).
+            while self._running and time.monotonic() < min(next_full, next_check) - 0.0:
+                slice_to = min(next_full, next_check) - time.monotonic()
+                if slice_to <= 0:
+                    break
+                await asyncio.sleep(min(1.0, slice_to))
+            if not self._running or time.monotonic() >= next_full:
+                return
+
+            live = _ka.parse_admission_settings(self._live_kanban_config())
+            # Re-derive the next check from the LIVE settle: an edit applies
+            # from the next check (§5.2 rules).
+            next_check = next_check + live.settle_seconds if next_check > t_full else t_full + live.settle_seconds
+            if live.mode != "enforce" or not _kanban_dispatch_allowed():
+                continue
+            if latches["nothing_admissible"]:
+                fingerprints = await _to_thread_process_service(
+                    dispatcher.board_fingerprints)
+                if fingerprints == latches["fingerprints"]:
+                    continue
+                latches["nothing_admissible"] = False
+                latches["fingerprints"] = None
+            if not await _to_thread_process_service(dispatcher.host_has_admissible_work):
+                continue
+            signals = await _to_thread_process_service(_ka.read_host_signals)
+            host_running = await _to_thread_process_service(
+                _kbd.count_running_tasks_all_boards)
+            decision = controller.decide(
+                time.monotonic(), signals, live,
+                dispatcher.settings.max_in_progress, host_running,
+            )
+            if not decision.allowance:
+                continue
+            results = await _to_thread_process_service(
+                lambda: dispatcher.tick_once(
+                    spawn_allowance=decision.allowance,
+                    admission_reason=decision.reason,
+                    admission_only=True,
+                ))
+            spawned_total = sum(
+                len(getattr(res, "spawned", None) or [])
+                for _slug, res in (results or []) if res is not None
+            )
+            controller.record(decision.now, spawned_total)
+            if spawned_total == 0:
+                # A positive allowance spawned nothing: the probe's blind spot
+                # (respawn guards, per-profile caps — D10) is holding the whole
+                # backlog. Latch until the next full tick or a board change.
+                latches["nothing_admissible"] = True
+                latches["fingerprints"] = await _to_thread_process_service(
+                    dispatcher.board_fingerprints)

@@ -1932,6 +1932,44 @@ DEFAULT_CONFIG = {
         # root profile named "default", so on a shared kanban.db every home can otherwise claim
         # default-assigned cards.
         "dispatch_profiles": None,
+        # Pressure-gated, paced adaptive worker admission (embedded gateway
+        # dispatcher only). "off" = today's dispatcher, byte-for-byte (no
+        # sub-passes, no decisions, no status file). "shadow" computes every
+        # decision and writes the status file but changes nothing. "enforce"
+        # admits at most `step` new workers per `settle_seconds` while CPU PSI
+        # is below `cpu_psi_hold` and MemAvailable is at least max(`headroom_
+        # min_gib`, `headroom_worker_multiple` x per-worker MemoryMax), up to
+        # `max_in_progress` (the ceiling, unchanged). Never kills or signals a
+        # running worker. Inactive (today's bursts) where /proc is unreadable.
+        # run_daemon / one-shot `hermes kanban dispatch` stay static in all modes.
+        "adaptive_admission": {
+            # off | shadow | enforce. Rollout is shadow-first; switching to off
+            # is live and always safe (only a ceiling change needs a restart
+            # while #117755 is unmerged).
+            "mode": "off",
+            # Max new workers per settle window (1..64).
+            "step": 2,
+            # Seconds between admission decisions; also the sub-pass cadence
+            # in enforce mode. Must be >= 1.
+            "settle_seconds": 5,
+            # Seconds of zero admission after a RED (CPU backoff threshold or
+            # the MemAvailable tiers). A debounce, not a backoff loop.
+            "backoff_cooldown_seconds": 10,
+            # Liveness floor: CPU holds and the headroom floor never starve the
+            # host below this many running workers (the MemAvailable tiers can).
+            # Clamped to max_in_progress. 1..64.
+            "min_running": 2,
+            # PSI cpu "some avg10" percentages: at/over hold -> admit 0 (AMBER,
+            # no cooldown); at/over backoff -> admit 0 and start the cooldown
+            # (RED). hold must stay below backoff.
+            "cpu_psi_hold": 30,
+            "cpu_psi_backoff": 60,
+            # Admission holds while MemAvailable is below max(headroom_min_gib,
+            # headroom_worker_multiple x per-worker MemoryMax), clamped to half
+            # of MemTotal. Sizes for suite-running workers, not the idle median.
+            "headroom_min_gib": 8,
+            "headroom_worker_multiple": 4,
+        },
         # Auto-run the decomposer on Triage tasks every tick. False = manual via `hermes kanban
         # decompose <id>` or the dashboard's Decompose button.
         "auto_decompose": True,

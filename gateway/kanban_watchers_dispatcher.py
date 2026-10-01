@@ -171,11 +171,23 @@ class _KanbanDispatcher:
         self.disabled_corrupt_boards.pop(slug, None)
         return True
 
-    def tick_once_for_board(self, slug: str) -> Optional[object]:
+    def tick_once_for_board(
+        self, slug: str,
+        *,
+        spawn_allowance: Optional[int] = None,
+        admission_reason: Optional[str] = None,
+        admission_only: bool = False,
+    ) -> Optional[object]:
         """Run one dispatch_once for a specific board.
 
         The per-board DB is opened explicitly so boards never share a
         connection or claim across each other.
+
+        Adaptive admission (plan rev2 §5.2): ``spawn_allowance`` is the
+        REMAINING host allowance for this pass. It is passed through to
+        ``dispatch_once`` (which can only tighten it) and the result reports
+        how many spawns it consumed so the caller can decrement before the
+        next board. ``admission_only`` marks an inter-tick sub-pass.
         """
         conn = None
         fingerprint = self.board_db_fingerprint(slug)
@@ -186,7 +198,12 @@ class _KanbanDispatcher:
             # No explicit init_db(): connect() runs the migration once per
             # process (see the matching note in the notifier collector).
             conn = _kbc().connect(board=slug)
-            return _kbd().dispatch_once(conn, board=slug, **kwargs)
+            return _kbd().dispatch_once(
+                conn, board=slug, **kwargs,
+                spawn_allowance=spawn_allowance,
+                admission_reason=admission_reason,
+                admission_only=admission_only,
+            )
         except Exception as exc:
             if self.is_corrupt_board_db_error(exc):
                 self.disabled_corrupt_boards[slug] = (fingerprint, time.monotonic())
@@ -206,9 +223,52 @@ class _KanbanDispatcher:
                 with contextlib.suppress(Exception):
                     conn.close()
 
-    def tick_once(self) -> list[tuple[str, Optional[object]]]:
-        """Run one dispatch_once per board. Returns (slug, result) pairs."""
-        return [(slug, self.tick_once_for_board(slug)) for slug in self._board_slugs()]
+    def tick_once(
+        self,
+        *,
+        spawn_allowance: Optional[int] = None,
+        admission_reason: Optional[str] = None,
+        admission_only: bool = False,
+    ) -> list[tuple[str, Optional[object]]]:
+        """Run one dispatch_once per board. Returns (slug, result) pairs.
+
+        With a ``spawn_allowance`` the HOST budget is shared across boards:
+        each board sees only what remains after the boards before it spawned
+        (``len(res.spawned)``), so N boards never multiply the allowance
+        (plan rev2 §5.7, T18). A board that spawns nothing (claim refused,
+        guard hit) consumes nothing.
+        """
+        results: list[tuple[str, Optional[object]]] = []
+        remaining = spawn_allowance
+        for slug in self._board_slugs():
+            res = self.tick_once_for_board(
+                slug,
+                spawn_allowance=remaining,
+                admission_reason=admission_reason,
+                admission_only=admission_only,
+            )
+            if res is not None and remaining is not None:
+                spawned = len(getattr(res, "spawned", None) or [])
+                remaining = max(0, remaining - spawned)
+            results.append((slug, res))
+        return results
+
+    def host_has_admissible_work(self) -> bool:
+        """Is there spawnable work on ANY board the dispatcher would spawn for?
+
+        The same probe as :meth:`ready_nonempty` (plan rev2 §5.2, MoA I5),
+        reused as the sub-pass trigger predicate: read-only, host-level,
+        review lane included only when review dispatch is on. Because the
+        probe ignores respawn guards and per-profile caps, a sub-pass that
+        spawns 0 despite it latches "nothing admissible" (see
+        ``_inter_tick_wait``) rather than re-probing every settle.
+        """
+        return self.ready_nonempty()
+
+    def board_fingerprints(self) -> dict[str, tuple]:
+        """``{slug: (path, mtime_ns, size)}`` for every board — the
+        nothing-admissible latch's re-arm signal (plan rev2 §5.2, T30)."""
+        return {slug: self.board_db_fingerprint(slug) for slug in self._board_slugs()}
 
     def ready_nonempty(self) -> bool:
         """Is there a ready+assigned+unclaimed task on ANY board the dispatcher would spawn for?

@@ -164,6 +164,12 @@ def _worker_memory_max_bytes() -> int:
     return min(override_bound, safe_bound) if override_bound else safe_bound
 
 
+# Public alias: the adaptive kanban admission headroom floor sizes against the
+# per-worker MemoryMax this function computes (the bound Hermes would apply,
+# independent of whether systemd scopes are available). No behavior change.
+worker_memory_max_bytes = _worker_memory_max_bytes
+
+
 def _systemd_scope_argv(binary: str, unit_name: str, *argv: str) -> List[str]:
     """``systemd-run --user --scope`` argv shared by the probe and real spawns.
     ``--collect`` self-cleans the scope after exit; ``--unit`` names it for systemctl.
