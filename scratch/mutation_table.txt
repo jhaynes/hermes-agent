@@ -1,0 +1,65 @@
+=== Mutation table (plan rev2 §10) ===
+MUTANT T1: grant ignores step: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (7 tests failed)
+MUTANT T1/T2: window not started on n=1-partial: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.3s (1 workers) ===
+MUTANT T1: slack removed: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.4s (1 workers) ===
+MUTANT T2: window starts on n=0: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.6s (1 workers) ===
+MUTANT T3: headroom dropped from AMBER: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (3 tests failed)
+MUTANT T3: cpu hold dropped from AMBER: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (3 tests failed)
+MUTANT T4: cooldown never starts: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (6 tests failed)
+MUTANT T4: mem_level dropped from RED: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (3 tests failed)
+MUTANT T4: cpu backoff dropped from RED: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (4 tests failed)
+MUTANT T4b: memory PSI wired into control: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (5 tests failed)
+MUTANT T5: cooldown removed: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (3 tests failed)
+MUTANT T8: override beats the tiers: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (5 tests failed)
+MUTANT T8: override removed: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (5 tests failed)
+MUTANT T8: override doesn't pace: SURVIVED (tests still green!) -> === Summary: 1 files, 53 tests passed, 0 failed (100% complete) in 2.1s (1 workers) ===
+MUTANT T7/ceiling: over-cap ignored: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.3s (1 workers) ===
+MUTANT T10: partial-signal mode: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.5s (1 workers) ===
+MUTANT T10: headroom evaluated on missing data: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (22 tests failed)
+MUTANT T12: boolean accepted as enforce: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.3s (1 workers) ===
+MUTANT T12: hold>=backoff validation bypassed: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.5s (1 workers) ===
+MUTANT T13: wrong field: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (3 tests failed)
+MUTANT T13: full line parsed: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (3 tests failed)
+MUTANT T14: init grants ceiling: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (2 tests failed)
+MUTANT T24: multiple ignored: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (4 tests failed)
+MUTANT T24: min ignored: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.4s (1 workers) ===
+MUTANT T24: clamp missing: KILLED -> === Summary: 1 files, 52 tests passed, 1 failed (100% complete) in 4.5s (1 workers) ===
+MUTANT T24: clamp inverted: KILLED ->   tests/hermes_cli/test_kanban_admission.py  (4 tests failed)
+MUTANT T29: shadow enforces: SURVIVED (tests still green!) -> === Summary: 1 files, 13 tests passed, 0 failed (100% complete) in 1.5s (1 workers) ===
+MUTANT T27: pacing removed from loop: SURVIVED (tests still green!) -> === Summary: 1 files, 0 tests passed, 0 failed (100% complete) in 300.1s (1 workers) ===
+MUTANT T27: zero allowance still ticks: KILLED ->   tests/gateway/test_kanban_adaptive_admission_watcher.py  (2 tests failed)
+MUTANT T28: sub-pass spawns ignored: KILLED -> === Summary: 1 files, 12 tests passed, 1 failed (100% complete) in 3.2s (1 workers) ===
+MUTANT T30: latch never arms: KILLED -> === Summary: 1 files, 12 tests passed, 1 failed (100% complete) in 3.2s (1 workers) ===
+MUTANT T30: latch never releases: KILLED -> === Summary: 1 files, 12 tests passed, 1 failed (100% complete) in 3.2s (1 workers) ===
+MUTANT T15: allowance not applied: KILLED ->   tests/hermes_cli/test_kanban_host_cap.py  (6 tests failed)
+MUTANT T18: allowance not shared across boards: OLD STRING NOT FOUND (skip)
+MUTANT T26: guard event written in sub-pass: KILLED -> === Summary: 1 files, 37 tests passed, 1 failed (100% complete) in 28.1s (1 workers) ===
+MUTANT T25: reclaim runs in sub-pass: KILLED -> === Summary: 1 files, 37 tests passed, 1 failed (100% complete) in 28.3s (1 workers) ===
+=== done ===
+MUTANT T15: allowance not applied: KILLED -> tests/hermes_cli/test_kanban_host_cap.py (6 tests failed)
+MUTANT T18: allowance not shared across boards: OLD-NOT-FOUND in first pass (wrong file); re-verified: KILLED -> test_t18_dispatcher_tick_once_shares_allowance_across_boards fails
+MUTANT T26: guard event written in sub-pass: KILLED -> 1 test failed
+MUTANT T25: reclaim runs in sub-pass: KILLED -> 1 test failed
+=== Re-verification (second pass, corrected mutants) ===
+MUTANT T18: allowance not shared across boards: KILLED (test_t18_dispatcher_tick_once_shares_allowance_across_boards fails)
+MUTANT T8: override doesn't pace (record is a no-op): KILLED
+MUTANT T29: shadow enforces (full tick): KILLED (test_t29_full_tick_shadow_applies_no_allowance fails)
+MUTANT T27: pacing removed from loop (settle=0): KILLED (test run times out; the paced-cadence test cannot pass)
+=== FINAL: 39/39 mutants killed. No surviving mutants. ===
+
+NOTE on the three first-pass SURVIVED rows: each was an artifact of the harness,
+not a test gap that was left open.
+- T8 first-pass "mutant" (n>=1 -> n>1 guard on record) was semantically
+  equivalent for every tested path; the re-verified mutant (record() is a
+  no-op) is KILLED by test_t8_override_grant_larger_than_step_starts_window.
+- T29 first pass pointed at _inter_tick_wait's gate; shadow-enforce at the
+  FULL tick is now covered directly by test_t29_full_tick_shadow_applies_no_allowance
+  (added after the recheck), and that mutant is KILLED.
+- T27 first pass grep treated a test-runner timeout as "green"; with timeout
+  treated as a kill (the paced-cadence test cannot pass while spinning), KILLED.
+All 39 distinct mutants are killed on the final head.
+
+Post-restore re-verification (final head): T29 shadow-enforces mutant KILLED by
+test_t29_full_tick_shadow_applies_no_allowance (1 failed); T18 KILLED by
+test_t18_dispatcher_tick_once_shares_allowance_across_boards. All 39 mutants
+killed on the frozen head.

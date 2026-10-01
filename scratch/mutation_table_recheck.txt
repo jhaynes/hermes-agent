@@ -1,0 +1,6 @@
+=== Re-verification of surviving mutants ===
+MUTANT T18: allowance not shared across boards: SURVIVED
+MUTANT T8: override doesn't pace (record is a no-op): KILLED (timeout/nonzero exit — test cannot pass)
+MUTANT T29: shadow enforces (full tick): KILLED (timeout/nonzero exit — test cannot pass)
+MUTANT T27: pacing removed from loop (settle=0): KILLED (timeout/nonzero exit — test cannot pass)
+=== done ===

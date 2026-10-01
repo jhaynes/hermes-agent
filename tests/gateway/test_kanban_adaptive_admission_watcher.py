@@ -368,6 +368,33 @@ def test_t30_latch_blocks_until_fingerprint_change(monkeypatch):
 # ---------------------------------------------------------------------------
 
 
+def test_t29_full_tick_shadow_applies_no_allowance(monkeypatch):
+    """The full tick's decision: shadow computes (GREEN, reason) but returns
+    NO allowance — today's full-tick semantics (T29)."""
+    from hermes_cli import kanban_admission as ka
+
+    monkeypatch.setattr(ka, "read_host_signals", lambda: _signals())
+    import hermes_cli.kanban_db_dispatch as kbd_mod
+
+    monkeypatch.setattr(kbd_mod, "count_running_tasks_all_boards", lambda: 5)
+
+    for mode, expect_allowance in (("shadow", None), ("enforce", 2), ("off", None)):
+        ctl = ka.AdmissionController(ka.parse_admission_settings(
+            {"adaptive_admission": _settings_block(mode=mode)}))
+        allowance, reason, decision = asyncio.run(kwatch._full_tick_admission(
+            ctl,
+            max_in_progress=64,
+            live_kanban_config={"adaptive_admission": _settings_block(mode=mode)},
+            clock=lambda: 100.0,
+        ))
+        if mode == "off":
+            assert (allowance, reason, decision) == (None, None, None)
+        else:
+            assert decision is not None and decision.level == "GREEN"
+            assert allowance == expect_allowance, mode
+            assert decision.allowance == 2, f"{mode} decision still computed"
+
+
 def test_t28_bad_tick_update_ignores_sub_pass_spawns():
     """A full tick with ready work and 0 full-tick spawns doesn't increment
     bad_ticks when a sub-pass spawned since the previous full tick."""

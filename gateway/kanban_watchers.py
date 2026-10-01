@@ -54,6 +54,37 @@ def _bad_tick_update(
     return bad_ticks + 1 if ready_pending and not any_spawned else 0
 
 
+async def _full_tick_admission(
+    controller,
+    *,
+    max_in_progress: Optional[int],
+    live_kanban_config: dict,
+    clock=time.monotonic,
+) -> "tuple[Optional[int], Optional[str], Optional[Any]]":
+    """One full-tick admission decision (plan rev2 §5.2).
+
+    Returns ``(allowance, reason, decision)``. In shadow mode the decision is
+    computed and recorded (status file, shadow counters) but the allowance is
+    NOT applied — the full tick runs with today's semantics (T29). In enforce
+    mode the allowance flows into ``dispatch_once``. ``decision`` is the
+    controller's Decision (for the status writer) or None when the live mode
+    is off.
+    """
+    from hermes_cli import kanban_admission as _ka
+    from hermes_cli import kanban_db_dispatch as _kbd
+
+    live = _ka.parse_admission_settings(live_kanban_config)
+    if live.mode == "off":
+        return None, None, None
+    signals = await _to_thread_process_service(_ka.read_host_signals)
+    host_running = await _to_thread_process_service(_kbd.count_running_tasks_all_boards)
+    decision = controller.decide(
+        clock(), signals, live, max_in_progress, host_running,
+    )
+    allowance = decision.allowance if live.mode == "enforce" else None
+    return allowance, decision.reason, decision
+
+
 class GatewayKanbanWatchersMixin:
     """Kanban watcher / notifier / dispatcher loops for GatewayRunner."""
 
@@ -356,30 +387,25 @@ class GatewayKanbanWatchersMixin:
                     allowance: Optional[int] = None
                     reason: Optional[str] = None
                     if controller is not None:
-                        live = _ka.parse_admission_settings(self._live_kanban_config())
-                        if live.mode != "off":
-                            signals = await _to_thread_process_service(_ka.read_host_signals)
-                            host_running = await _to_thread_process_service(
-                                _kbd.count_running_tasks_all_boards)
-                            decision = controller.decide(
-                                time.monotonic(), signals, live,
-                                settings.max_in_progress, host_running,
-                            )
-                            reason = decision.reason
-                            if live.mode == "enforce":
-                                allowance = decision.allowance
-                            if status_writer is not None:
-                                ceiling_configured = await _to_thread_process_service(
-                                    _ka.live_configured_ceiling)
-                                status_writer.record_full_tick(decision, extra={
-                                    "pid": os.getpid(),
-                                    "mode": live.mode,
-                                    "host_running": host_running,
-                                    "shadow_counters": controller.shadow_counters(),
-                                    **_ka.status_fields(
-                                        decision,
-                                        ceiling_configured=ceiling_configured),
-                                })
+                        allowance, reason, decision = await _full_tick_admission(
+                            controller,
+                            max_in_progress=settings.max_in_progress,
+                            live_kanban_config=self._live_kanban_config(),
+                        )
+                        if decision is not None and status_writer is not None:
+                            live = _ka.parse_admission_settings(
+                                self._live_kanban_config())
+                            ceiling_configured = await _to_thread_process_service(
+                                _ka.live_configured_ceiling)
+                            status_writer.record_full_tick(decision, extra={
+                                "pid": os.getpid(),
+                                "mode": live.mode,
+                                "host_running": decision.host_running,
+                                "shadow_counters": controller.shadow_counters(),
+                                **_ka.status_fields(
+                                    decision,
+                                    ceiling_configured=ceiling_configured),
+                            })
 
                     results = await _to_thread_process_service(
                         lambda: dispatcher.tick_once(

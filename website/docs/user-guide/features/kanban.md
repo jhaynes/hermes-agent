@@ -1010,7 +1010,7 @@ All commands are also available as a slash command in the interactive CLI and in
 
 | Config key | Default | What it does |
 |------------|---------|--------------|
-| `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. |
+| `kanban.max_in_progress` | unset (unlimited) | Caps the number of simultaneously running tasks. When the board already has N running, the dispatcher skips spawning more — useful for slow workers (local LLMs, resource-constrained hosts) so they finish what they have before more pile up and time out. Invalid or below-1 values log a warning and behave as unlimited. This is the HOST ceiling adaptive admission grows toward — see [Adaptive admission](#adaptive-admission). |
 | `kanban.max_in_progress_per_profile` | unset (unlimited) | Per-profile variant of `max_in_progress` — caps how many tasks any single assignee profile may run concurrently. Useful when one profile is slow or rate-limited but others should keep flowing. Applies alongside the board-wide `max_in_progress`; both must allow a spawn for it to proceed. |
 | `kanban.dispatch_profiles` | unset (any existing profile) | Per-home claim allowlist for boards shared across Hermes homes. When the key is present, this home's dispatcher only claims cards whose assignee is listed — fail-closed: an empty list, `null` or a bare `dispatch_profiles:` claims nothing, and a config read that fails logs a warning and claims nothing; other assignees land in `skipped_nonspawnable`. Only omitting the key means "any existing profile". `hermes kanban diagnostics` prints the resolved value for this home (`any`, the listed names, or `none (fail-closed: …)`). See [Shared boards across homes](#shared-boards-across-homes). |
 | `kanban.auto_promote_children` | `true` | After `decompose_triage_task()` produces children with no parent-blocker dependencies, they're automatically promoted to `ready` so the dispatcher can pick them up. Set to `false` to require manual review — children stay in `todo` until you promote them. |
@@ -1036,9 +1036,43 @@ hermes kanban create "nightly backup audit" \
 
 The dispatcher refuses to re-spawn a ready task when it hit a quota/auth/429 error on the previous run (`blocker_auth`), or completed a run successfully within the guard window (`recent_success`), or a recent task comment links to a GitHub PR (`active_pr`). Two cooldowns hold a card without ever counting against it: `rate_limit_cooldown` after a quota-wall requeue and `infrastructure_cooldown` after the host refused to place the worker (no restart-safe systemd scope — see [Workers and systemd cgroups](#workers-and-systemd-cgroups)); both share the `HERMES_KANBAN_RATE_LIMIT_COOLDOWN_SECONDS` window (default 300 s). This prevents repeat worker storms on the same bug or task while a human catches up. See the `respawn_guarded` row in the [event reference](#event-reference).
 
-To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`.
+To see why a ready card is not spawning, run `hermes kanban dispatch --dry-run` — the output lists `Guarded (<reason>): <task id>` per held card (and `respawn_guarded`, `rate_limited`, `skipped_locked`, `memory_pressure` with `--json`). The gateway's and the standalone daemon's "dispatcher stuck" warning also names what the last tick held back, e.g. `Last tick held back: active_pr=1`, including `admission=<reason>` (cooldown, pacing, red, or `admission_inactive:<signal>`) when [adaptive admission](#adaptive-admission) held it.
 
 `recent_success` and `active_pr` hold the **ready** lane only — they are the inputs to a review handoff, not signals against one. To have a reviewer, closer or other recovery profile pick up a card whose PR is already open, either move it to the review lane with `hermes kanban request-review <id>` (accepted from `ready` as well as `running`; the review-lane spawn is not subject to either guard) or hand the ready card to that profile with `hermes kanban assign <id> <profile>`: a handoff recorded *after* the PR comment — an operator reassign, a reviewer's changes-requested verdict, or a review reopen — lifts `active_pr` for the profile now named on the card, because that PR is exactly what it must work on. Only a change to a *different* profile counts: re-assigning the same profile, unassigning, or the dispatcher's own `kanban.default_assignee` fill-in does not lift the guard, so the assignee that opened the PR is still not re-spawned against it after a crash, reclaim or no-op reassign, and a newer PR comment posted after the handoff guards again. A deliberate re-queue after a success (drag `done→ready`, `unblock`, re-promotion) also lifts `recent_success`, so a manual re-run is never silently held for the whole window.
+
+### Adaptive admission
+
+By default the dispatcher admits work as fast as its caps allow: a tick with budget N spawns N workers at once. `kanban.adaptive_admission` (default **off** — the dispatcher behaves exactly as before) turns that into **pressure-gated, paced admission** under the same operator ceiling: the host's running count grows by at most `step` new workers per `settle_seconds` while the host shows no CPU contention and has memory headroom, up to `kanban.max_in_progress`. It never kills, signals or throttles a **running** worker — a worker admitted while idle can later start a heavy test suite, and only the ceiling, the per-worker cgroup `MemoryMax` and the kernel bound that growth.
+
+| Config key | Default | What it does |
+|------------|---------|--------------|
+| `kanban.adaptive_admission.mode` | `off` | `off` = today's dispatcher byte-for-byte (no decisions, no status file). `shadow` computes and logs every decision but changes nothing — the rollout/observation mode. `enforce` applies the allowance and runs admission sub-passes between full ticks. |
+| `kanban.adaptive_admission.step` | `2` | Max new workers per settle window (1–64). With the 5 s default that is at most 24 workers/min. |
+| `kanban.adaptive_admission.settle_seconds` | `5` | Seconds between admission decisions; also the sub-pass cadence in `enforce` mode (≥ 1). |
+| `kanban.adaptive_admission.backoff_cooldown_seconds` | `10` | Seconds of zero admission after a RED condition (CPU at the backoff threshold, or the MemAvailable pressure tiers). A debounce, not a backoff loop. |
+| `kanban.adaptive_admission.min_running` | `2` | Liveness floor: CPU holds and the headroom floor never starve the host below this many running workers. The MemAvailable tiers can (a genuinely exhausted host must drain). |
+| `kanban.adaptive_admission.cpu_psi_hold` | `30` | Linux PSI cpu `some avg10` %: at/over this, admit nothing (hold) until it decays; no cooldown starts. |
+| `kanban.adaptive_admission.cpu_psi_backoff` | `60` | At/over this, admit nothing and start the cooldown (RED). Must stay above `cpu_psi_hold`. |
+| `kanban.adaptive_admission.headroom_min_gib` | `8` | Admission holds while `MemAvailable` is below `max(headroom_min_gib, headroom_worker_multiple × per-worker MemoryMax)`, clamped to half of `MemTotal`. Sized for suite-running workers (the per-worker cgroup bound), not the idle median. |
+
+How it runs:
+
+- The **full tick** (every `kanban.dispatch_interval_seconds`, default 60 s) keeps all of its work — reclaim, promotion, auto-decompose, health telemetry. In `enforce` mode the embedded gateway dispatcher additionally runs **admission-only sub-passes** every `settle_seconds` between full ticks: they only claim and spawn, skip reclaim/WAL-checkpoint/tick-hook, and never write `respawn_guarded` events (the next full tick records those once, as before). A fully guarded or per-profile-capped backlog costs one sub-pass per interval, not one per 5 s (a nothing-admissible latch re-arms on any board DB change).
+- Signals come from `/proc/pressure/cpu` (`some avg10`), `/proc/meminfo` (MemAvailable/MemTotal) and the same memory-pressure tiers the dashboard banner uses. On hosts where those are unreadable (macOS, some containers) the controller is **inactive** and the dispatcher behaves exactly as before — including its per-tick burst up to the ceiling. Memory PSI is recorded for observability but is deliberately not a control signal (host PSI includes reclaim inside a worker's own cgroup limit).
+- Every setting is re-read live at each check (mtime-cached; a torn config write keeps the last-known-good), so mode and tuning changes apply within one `settle_seconds` — no gateway restart. Only a **ceiling change** needs a gateway restart while the dispatcher's boot-time settings snapshot is still resolved once at startup (upstream issue #117734 tracks making those live); `hermes kanban stats --json` reports `ceiling_restart_pending: true` when the boot ceiling and the configured one differ. Switching `mode` back to `off` is live and always safe: it only removes a clamp.
+- The deprecated `hermes kanban daemon` path and one-shot `hermes kanban dispatch` stay **static** in all modes (they print a note when the mode isn't `off`); the embedded gateway dispatcher owns adaptive admission.
+- `hermes kanban stats --json` gains an `admission` block (mode, level, allowance, ceiling, headroom floor, signal values, shadow counters, `age_seconds`, `stale`) whenever the mode isn't `off`. Human output prints a one-line `Admission:` summary.
+
+```yaml
+kanban:
+  max_in_progress: 64            # the ceiling — unchanged meaning
+  adaptive_admission:
+    mode: shadow                 # off | shadow | enforce (roll out shadow-first)
+    step: 2
+    settle_seconds: 5
+```
+
+Unsupported topologies (documented, not detected): several kanban homes sharing one host, and containers or cgroup CPU quotas where host PSI is not the container's view.
 
 ### Drag-to-delete and bulk delete (dashboard)
 

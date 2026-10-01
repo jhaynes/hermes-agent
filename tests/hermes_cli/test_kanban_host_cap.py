@@ -510,6 +510,40 @@ def test_t18_host_allowance_shared_across_boards(
     assert len(spawns) == 4
 
 
+def test_t18_dispatcher_tick_once_shares_allowance_across_boards(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """``_KanbanDispatcher.tick_once(spawn_allowance=N)`` shares ONE host
+    allowance across boards: the second board sees only what remains after
+    the first spawned (plan §5.7, T18). Drives the real dispatcher layer."""
+    from gateway.kanban_watchers_dispatcher import _DispatcherSettings, _KanbanDispatcher
+
+    import hermes_cli.profiles as profmod
+
+    monkeypatch.setattr(profmod, "profile_exists", lambda name: True)
+
+    kb.create_board("second")
+    spawns: list = []
+    for board in ("default", "second"):
+        with kbc.connect(board=board) as conn:
+            for i in range(5):
+                kb.create_task(conn, title=f"{board}-{i}", assignee="alice")
+
+    settings = _DispatcherSettings(
+        interval=60.0, max_spawn=None, max_in_progress=100, failure_limit=2,
+        stale_timeout_seconds=0, reconcile_orphans=True, default_assignee=None,
+        max_in_progress_per_profile=None,
+    )
+    dispatcher = _KanbanDispatcher(kb, settings)
+    results = dispatcher.tick_once(spawn_allowance=2)
+
+    total = sum(
+        len(getattr(res, "spawned", None) or [])
+        for _slug, res in results if res is not None
+    )
+    assert total == 2, f"the host allowance must cap the whole pass, got {total}"
+
+
 def test_t18_failed_claim_does_not_consume_allowance(
     kanban_home, all_assignees_spawnable,
 ):
