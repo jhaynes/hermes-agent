@@ -1054,6 +1054,7 @@ By default the dispatcher admits work as fast as its caps allow: a tick with bud
 | `kanban.adaptive_admission.cpu_psi_hold` | `30` | Linux PSI cpu `some avg10` %: at/over this, admit nothing (hold) until it decays; no cooldown starts. |
 | `kanban.adaptive_admission.cpu_psi_backoff` | `60` | At/over this, admit nothing and start the cooldown (RED). Must stay above `cpu_psi_hold`. |
 | `kanban.adaptive_admission.headroom_min_gib` | `8` | Admission holds while `MemAvailable` is below `max(headroom_min_gib, headroom_worker_multiple × per-worker MemoryMax)`, clamped to half of `MemTotal`. Sized for suite-running workers (the per-worker cgroup bound), not the idle median. |
+| `kanban.adaptive_admission.headroom_worker_multiple` | `4` | The multiple of the per-worker cgroup `MemoryMax` reserved as headroom before admitting more workers (used in the floor formula above; clamped by `headroom_min_gib` and half of `MemTotal`). Size it to how many workers you want spawning while a suite is already running. |
 
 How it runs:
 

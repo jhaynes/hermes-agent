@@ -484,6 +484,40 @@ def test_t17_run_daemon_prints_static_note_when_mode_not_off(
     assert "static" in out
 
 
+def test_t17_one_shot_dispatch_prints_static_note_when_mode_not_off(
+    kanban_home, monkeypatch, capsys,
+):
+    """One-shot ``hermes kanban dispatch`` prints the same static note when
+    adaptive admission is on (plan §4: "Each prints a note when
+    adaptive_admission.mode is not off" — run_daemon AND one-shot dispatch;
+    R1 scope F3 / arch A8)."""
+    from hermes_cli import kanban_admission as ka
+    from hermes_cli import kanban_ops
+
+    monkeypatch.setattr(
+        kbd, "dispatch_once",
+        lambda conn, **kw: kb.DispatchResult(),
+    )
+    monkeypatch.setattr(
+        ka, "live_admission_settings",
+        lambda: ka.parse_admission_settings(
+            {"adaptive_admission": {"mode": "shadow"}}),
+    )
+    import argparse
+
+    args = argparse.Namespace(
+        dry_run=False, json=False, max=None,
+        failure_limit=kbd.DEFAULT_FAILURE_LIMIT,
+    )
+    rc = kanban_ops._cmd_dispatch(args)
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "adaptive admission" in out
+    assert "static" in out
+    assert "one-shot dispatch" in out
+
+
 def test_t18_host_allowance_shared_across_boards(
     kanban_home, all_assignees_spawnable,
 ):

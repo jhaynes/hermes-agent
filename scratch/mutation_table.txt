@@ -63,3 +63,26 @@ Post-restore re-verification (final head): T29 shadow-enforces mutant KILLED by
 test_t29_full_tick_shadow_applies_no_allowance (1 failed); T18 KILLED by
 test_t18_dispatcher_tick_once_shares_allowance_across_boards. All 39 mutants
 killed on the frozen head.
+
+=== R2 reconcile mutation re-check (post R1 fixes, before the R2 freeze) ===
+Ran 2026-10-01 (integration run t_4d495bda) via scratch/r2_mutation_recheck.sh
+against the fixed tree; receipts in scratch/r2_mutation_recheck.txt.
+9/9 KILLED, no survivors:
+- W2_fulltick_allowance_none: KILLED (test_prod_wiring_full_tick_applies_enforce_allowance)
+- W1_fulltick_record_dropped: KILLED (test_prod_wiring_full_tick_grant_paces_first_sub_pass)
+- A3_completion_stamp: KILLED (test_prod_wiring_full_tick_stamp_uses_decision_time)
+- Q2_wal_blind_fingerprint: KILLED (test_board_fingerprint_sees_wal_sidecar_commits)
+- F2_subpass_spawns_not_fed: KILLED (test_prod_wiring_sub_pass_spawns_clear_bad_ticks)
+- F1_bootoff_controller_none: KILLED (2 prod-wiring tests)
+- sysF1_mixed_type_keys_sort: KILLED (test_t12_mixed_type_keys_do_not_raise)
+- sysF1_huge_int_overflow: KILLED (test_t12_huge_int_reverts_to_default)
+- Q3_shadow_never_decides: KILLED (9 tests, incl. shadow sub-pass-schedule decisions)
+
+Note on W1/A3 killability: the R1 survivors were unkillable because the
+shipped loop read LIVE settings one settle BEFORE each check (at iteration
+top). The plan's §5.2 pseudocode reads settings AT the check, after the
+sleep ("mode changes are seen at the next check", within one settle). The
+R2 restructure moved the read after the sleep (fresh read per check) —
+this both restores the plan's liveness contract and makes the full-tick
+record's pacing stamp observable (W1) and its decision-time anchoring
+observable (A3), via a mid-interval live settle edit (5s -> 7s).

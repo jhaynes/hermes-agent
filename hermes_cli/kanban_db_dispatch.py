@@ -2139,6 +2139,12 @@ def _dispatch_lane_task(
     if guard_reason is not None:
         result.respawn_guarded.append((task_id, guard_reason))
         # Event so ``hermes kanban tail`` shows why the task looks stuck.
+        # Honour kanban.default_assignee: when the dispatcher hits an unassigned ready task and an
+        # operator-configured fallback exists, persist the assignment and proceed. This removes the
+        # dashboard footgun where a task created without an assignee parks in 'ready' forever even though
+        # the operator's intent ("default") was perfectly clear (#27145). Mutating the row (not just the
+        # in-memory view) keeps diagnostics and the board state consistent: the task is now legitimately
+        # owned by ``kanban.default_assignee``, not "unassigned but secretly routed".
         # Admission-only sub-passes skip the write: the guard is re-checked on
         # the next full tick, which records it once (as today) instead of one
         # row per 5 s sub-pass (plan rev2 §5.2).

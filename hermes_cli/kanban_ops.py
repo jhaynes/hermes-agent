@@ -81,6 +81,25 @@ def _cmd_dispatch(args: argparse.Namespace) -> int:
     except Exception:
         default_assignee = max_in_progress_per_profile = max_in_progress = None
         max_spawn = getattr(args, "max", None)
+    # Adaptive admission (plan rev2 §4): one-shot dispatch stays STATIC in
+    # v1 — no controller, no sub-pass, in every mode. One note so an operator
+    # who enabled adaptive in config knows why it doesn't apply here (and
+    # that this path can exceed the paced rate if run alongside the
+    # embedded dispatcher) — the same note the deprecated daemon prints.
+    try:
+        from hermes_cli.kanban_admission import live_admission_settings
+
+        admission = live_admission_settings()
+        if admission.mode != "off":
+            print(
+                "kanban: adaptive admission is "
+                f"{admission.mode!r} but one-shot dispatch stays "
+                "static (no pacing); the embedded gateway dispatcher "
+                "owns adaptive admission.",
+                flush=True,
+            )
+    except Exception:
+        pass
     with kbc.connect_closing() as conn:
         res = kbd.dispatch_once(
             conn,

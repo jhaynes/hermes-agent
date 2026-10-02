@@ -132,22 +132,35 @@ class _KanbanDispatcher:
     def __init__(self, kb: Any, settings: _DispatcherSettings) -> None:
         self.kb = kb
         self.settings = settings
-        self.disabled_corrupt_boards: dict[str, tuple[tuple[str, int | None, int | None], float]] = {}
+        self.disabled_corrupt_boards: dict[str, tuple[tuple, float]] = {}
 
     def _board_slugs(self) -> list:
         return _board_slugs(self.kb)
 
-    def board_db_fingerprint(self, slug: str) -> tuple[str, int | None, int | None]:
+    def board_db_fingerprint(self, slug: str) -> tuple:
         path = self.kb.kanban_db_path(slug)
         try:
             resolved = str(path.expanduser().resolve())
         except Exception:
             resolved = str(path)
-        try:
-            stat = path.stat()
-        except OSError:
-            return (resolved, None, None)
-        return (resolved, stat.st_mtime_ns, stat.st_size)
+
+        def _stat(p) -> tuple[int | None, int | None]:
+            try:
+                st = p.stat()
+            except OSError:
+                return (None, None)
+            return (st.st_mtime_ns, st.st_size)
+
+        # The -wal sidecar is part of the board DB state: in WAL mode a
+        # committed row write moves the -wal file long before the main DB
+        # is checkpointed, so a fingerprint over the main file alone never
+        # changes on the writes that matter (nothing-admissible latch
+        # re-arm, plan rev2 §5.2; R1 quality Q2). Absent sidecars (e.g.
+        # DELETE journal mode) stat as (None, None) — identical for every
+        # such board, so they never produce spurious re-arms.
+        main_stat = _stat(path)
+        wal_stat = _stat(path.parent / (path.name + "-wal"))
+        return (resolved, main_stat, wal_stat)
 
     def is_corrupt_board_db_error(self, exc: Exception) -> bool:
         if isinstance(exc, _kbc().KanbanDbCorruptError):

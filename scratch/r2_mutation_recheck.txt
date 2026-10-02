@@ -1,0 +1,10 @@
+MUTANT W2_fulltick_allowance_none: KILLED -> === Summary: 1 files, 23 tests passed, 1 failed, 1 skipped (100% complete) in 4.0s (1 workers) ===
+MUTANT W1_fulltick_record_dropped: KILLED -> === Summary: 1 files, 23 tests passed, 1 failed, 1 skipped (100% complete) in 4.0s (1 workers) ===
+MUTANT A3_completion_stamp: KILLED -> === Summary: 1 files, 23 tests passed, 1 failed, 1 skipped (100% complete) in 4.1s (1 workers) ===
+MUTANT Q2_wal_blind_fingerprint: KILLED -> === Summary: 1 files, 23 tests passed, 1 failed, 1 skipped (100% complete) in 4.1s (1 workers) ===
+MUTANT F2_subpass_spawns_not_fed: KILLED -> === Summary: 1 files, 23 tests passed, 1 failed, 1 skipped (100% complete) in 4.1s (1 workers) ===
+MUTANT F1_bootoff_controller_none: KILLED -> === Summary: 1 files, 22 tests passed, 2 failed, 1 skipped (100% complete) in 4.1s (1 workers) ===
+MUTANT sysF1_mixed_type_keys_sort: KILLED -> === Summary: 1 files, 54 tests passed, 1 failed (100% complete) in 4.4s (1 workers) ===
+MUTANT sysF1_huge_int_overflow: KILLED -> === Summary: 1 files, 54 tests passed, 1 failed (100% complete) in 4.3s (1 workers) ===
+MUTANT Q3_shadow_never_decides: KILLED -> === Summary: 1 files, 15 tests passed, 9 failed, 1 skipped (100% complete) in 4.2s (1 workers) ===
+=== done ===

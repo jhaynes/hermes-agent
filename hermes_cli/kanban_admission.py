@@ -134,7 +134,11 @@ def _number_field(
     if not _is_finite_number(raw):
         _warn_bad(key, raw, warn)
         return default
-    value = float(raw)
+    try:
+        value = float(raw)
+    except (OverflowError, ValueError):  # e.g. int too large for float (§6)
+        _warn_bad(key, raw, warn)
+        return default
     if (lo is not None and value < lo) or (hi is not None and value > hi):
         _warn_bad(key, raw, warn)
         return default
@@ -161,7 +165,12 @@ def parse_admission_settings(
         elif raw_block is not None:
             _warn_bad("adaptive_admission", raw_block, warn)
 
-    for key in sorted(set(block) - _KNOWN_KEYS):
+    # Unknown keys warn once and are ignored (§6). Keys are stringified for
+    # the warning and iterated WITHOUT sorting: a YAML mapping can carry
+    # non-str keys (``1: oops``), and sorted() over mixed types raises
+    # TypeError — the parse must be TOTAL so no config shape can kill the
+    # dispatcher at boot or on the live re-read (R1 system F1).
+    for key in set(block) - _KNOWN_KEYS:
         _warn_bad(key, block[key], warn)
 
     mode_raw = block.get("mode", "off")
@@ -616,3 +625,101 @@ class StatusWriter:
         }
         payload.update(extra)
         return payload
+
+
+# ---------------------------------------------------------------------------
+# Exposure (§9): anchor line + coalesced transition/inactive logging.
+# Pure helpers — the watcher wires them to its logger; nothing here reads
+# config, the clock (beyond the injected ``now``) or the status file.
+# ---------------------------------------------------------------------------
+
+
+def admission_anchor_line(
+    settings: AdmissionSettings, *, ceiling: Optional[int],
+    signals: Optional[HostSignals] = None,
+) -> str:
+    """The one INFO anchor line per start (§9):
+
+    ``kanban admission: mode=enforce ceiling=64 step=2/5s window=avg10
+    headroom_floor=16.0GiB``. The floor is computed from ``signals`` when a
+    sample is supplied; without one (unreadable host) the line reports the
+    configured floor shape ``max(min_gib, multiple x worker_bound)`` as
+    ``floor~...``. Returns ``""`` when the mode is ``off`` (no anchor for
+    today's dispatcher, §5.1)."""
+    if settings.mode == "off":
+        return ""
+    if (signals is not None and signals.mem_total_bytes
+            and signals.mem_avail_bytes is not None):
+        floor = headroom_floor_bytes(
+            settings, _worker_bound_cached(), signals.mem_total_bytes)
+        floor_txt = f"{floor / _GIB:.1f}GiB"
+    else:
+        floor_txt = (
+            f"~max({settings.headroom_min_gib}GiB,"
+            f"{settings.headroom_worker_multiple}xWorkerMax)"
+        )
+    return (
+        f"kanban admission: mode={settings.mode} ceiling={ceiling} "
+        f"step={settings.step}/{settings.settle_seconds:g}s window=avg10 "
+        f"headroom_floor={floor_txt}"
+    )
+
+
+class AdmissionLogPolicy:
+    """Coalesced transition logging (§9, R1 scope F2 / arch A4).
+
+    Rules:
+    - the FIRST RED after a non-RED run logs immediately at WARNING, with
+      the trigger and threshold;
+    - other transitions log at INFO at most once per full interval, with
+      the latest state and a transition count;
+    - ``admission_inactive`` (§5.4, MoA I7) logs at WARNING once per
+      distinct reason while the mode isn't ``off``.
+
+    Pure given the injected ``now``; the caller supplies the emit hooks.
+    """
+
+    def __init__(self, *, interval: float, warn, info):
+        self._interval = max(float(interval), 1.0)
+        self._warn = warn
+        self._info = info
+        self._level: Optional[str] = None
+        self._reason: Optional[str] = None
+        self._last_info_at: Optional[float] = None
+        self._transitions = 0
+        self._warned_inactive: set[str] = set()
+
+    def observe(self, decision: Decision, *, now: float, mode: str) -> None:
+        """One decision's log side effects (idempotent per state)."""
+        if mode == "off":
+            return
+        reason = decision.reason
+        if reason.startswith("admission_inactive:"):
+            if reason not in self._warned_inactive:
+                self._warned_inactive.add(reason)
+                self._warn(
+                    f"kanban admission: inactive ({reason}); the dispatcher "
+                    f"runs today's uncapped behavior until inputs recover")
+            return
+        level = decision.level
+        if self._level is None:
+            self._level, self._reason = level, reason
+            self._transitions = 0
+            return
+        if (level, reason) == (self._level, self._reason):
+            return
+        self._transitions += 1
+        first_red = level == "RED" and self._level != "RED"
+        self._level, self._reason = level, reason
+        if first_red:
+            self._warn(
+                f"kanban admission: RED ({decision.trigger}); admitting "
+                f"nothing until the condition clears")
+            self._last_info_at = now
+            return
+        if self._last_info_at is None or now - self._last_info_at >= self._interval:
+            self._info(
+                f"kanban admission: {self._level} ({self._reason}); "
+                f"{self._transitions} transition(s) since the last line")
+            self._last_info_at = now
+            self._transitions = 0

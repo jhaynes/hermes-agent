@@ -561,6 +561,38 @@ def test_t12_min_running_ceiling_clamp_is_decide_time():
     assert d.allowance == 8
 
 
+def test_t12_mixed_type_keys_do_not_raise():
+    """A YAML block with a non-str key (e.g. ``1: oops``) is invalid input,
+    not a crash: the bad key warns and is ignored, every valid key still
+    parses (§6 fail-safe; regression: sorted() over mixed key types raised
+    TypeError and killed the embedded dispatcher at boot AND on the live
+    re-read — R1 system F1 / quality Q4)."""
+    block = {"mode": "shadow", 1: "oops", "stepp": 3}
+    parsed, warnings = _parse_mixed(block)
+    assert parsed.mode == "shadow"
+    assert parsed.step == 2
+    assert parsed.settle_seconds == 5.0
+    assert len(warnings) >= 2, "both the non-str key and the typo key must warn"
+
+
+def _parse_mixed(block):
+    warnings: list[str] = []
+    parsed = ka.parse_admission_settings(
+        {"adaptive_admission": block}, warn=warnings.append)
+    return parsed, warnings
+
+
+def test_t12_huge_int_reverts_to_default():
+    """A YAML integer too large for float() (e.g. ``step: 10**400``) reverts
+    to the default with a warning instead of raising OverflowError (§6;
+    regression: the raise escaped _inter_tick_wait and killed the watcher)."""
+    for key in ("step", "settle_seconds", "cpu_psi_hold", "headroom_min_gib"):
+        parsed, warnings = _parse_mixed({key: 10 ** 400})
+        base = ka.parse_admission_settings({"kanban": {}})
+        assert getattr(parsed, key) == getattr(base, key), key
+        assert warnings, key
+
+
 # ---------------------------------------------------------------------------
 # T29: shadow mode parity
 # ---------------------------------------------------------------------------
@@ -677,3 +709,122 @@ def test_over_cap_host_grants_zero_and_drains():
                    ceiling=64, host_running=70)
     assert d.allowance == 0
     assert d.reason in ("over_ceiling", "ceiling")
+
+
+# ---------------------------------------------------------------------------
+# §9 exposure (R1 scope F2 / arch A4): anchor line + coalesced logging
+# ---------------------------------------------------------------------------
+
+
+def test_anchor_line_shape_and_no_anchor_when_off():
+    """The one INFO anchor per start (§9): mode, ceiling, step/settle,
+    window, headroom floor. mode=off emits nothing (§5.1: off is today's
+    dispatcher, byte-for-byte)."""
+    line = ka.admission_anchor_line(
+        settings(mode="enforce"), ceiling=64, signals=signals())
+    assert line.startswith("kanban admission: mode=enforce ceiling=64 ")
+    assert "step=2/5s" in line
+    assert "window=avg10" in line
+    # 4 GiB bound, 62 GiB total -> max(8, 4x4)=16 GiB floor (the tower shape)
+    assert "headroom_floor=16.0GiB" in line
+    assert ka.admission_anchor_line(settings(mode="off"), ceiling=64,
+                                    signals=signals()) == ""
+
+
+def test_anchor_line_unreadable_host_reports_floor_shape():
+    """No signal sample (unreadable host): the floor prints its configured
+    shape instead of a computed value — never a crash, never a lie."""
+    line = ka.admission_anchor_line(
+        settings(mode="shadow"), ceiling=8, signals=None)
+    assert "mode=shadow ceiling=8" in line
+    assert "~max(8GiB,4xWorkerMax)" in line
+
+
+def test_log_policy_first_red_logs_warning_immediately():
+    """The FIRST RED after a non-RED run logs immediately at WARNING with the
+    trigger (§9) — not coalesced away behind the interval."""
+    warns, infos = [], []
+    policy = ka.AdmissionLogPolicy(interval=60.0, warn=warns.append,
+                                   info=infos.append)
+    ctl = controller()
+
+    green = ctl.decide(now=100.0, signals=signals(), settings=settings(),
+                       ceiling=64, host_running=5)
+    policy.observe(green, now=100.0, mode="enforce")
+    red = ctl.decide(now=110.0, signals=signals(cpu_psi=80.0),
+                     settings=settings(), ceiling=64, host_running=5)
+    policy.observe(red, now=110.0, mode="enforce")
+
+    assert not warns or "RED" not in "".join(warns) or any(
+        "RED" in w for w in warns), "sanity"
+    # The RED transition itself:
+    assert any("RED" in w for w in warns), warns
+    assert any(red.trigger in w for w in warns), warns
+
+
+def test_log_policy_coalesces_repeated_transitions_to_one_info_per_interval():
+    """Repeated level flips log at most one INFO per full interval, carrying
+    the latest state and a transition count (§9) — a flapping host must not
+    spam the log every settle."""
+    warns, infos = [], []
+    policy = ka.AdmissionLogPolicy(interval=60.0, warn=warns.append,
+                                   info=infos.append)
+    ctl = controller()
+
+    # GREEN at 100 (first observation seeds the state, no log), then flip
+    # AMBER at 105 (logs INFO), flip GREEN at 106 (coalesced — within the
+    # interval), flip AMBER at 107 (still coalesced), then at 200 (a full
+    # interval later) the AMBER logs again with the transition count.
+    d_green = ctl.decide(now=100.0, signals=signals(), settings=settings(),
+                         ceiling=64, host_running=5)
+    policy.observe(d_green, now=100.0, mode="enforce")
+    d_amber = ctl.decide(now=105.0, signals=signals(cpu_psi=40.0),
+                         settings=settings(), ceiling=64, host_running=5)
+    policy.observe(d_amber, now=105.0, mode="enforce")
+    policy.observe(d_green, now=106.0, mode="enforce")
+    policy.observe(d_amber, now=107.0, mode="enforce")
+
+    assert len(infos) == 1, infos
+    assert "AMBER" in infos[0]
+    policy.observe(d_green, now=200.0, mode="enforce")
+    assert len(infos) == 2
+    assert "transition(s) since the last line" in infos[1]
+
+
+def test_log_policy_inactive_warns_once_per_reason():
+    """``admission_inactive:<which>`` (§5.4, MoA I7) logs at WARNING once per
+    DISTINCT reason while the mode isn't off — a host with unreadable
+    /proc must not warn every settle."""
+    warns, infos = [], []
+    policy = ka.AdmissionLogPolicy(interval=60.0, warn=warns.append,
+                                   info=infos.append)
+    ctl = controller()
+
+    inactive_psi = ctl.decide(
+        now=100.0, signals=signals(cpu_psi=None), settings=settings(),
+        ceiling=64, host_running=5)
+    assert inactive_psi.reason == "admission_inactive:cpu_psi"
+    policy.observe(inactive_psi, now=100.0, mode="enforce")
+    policy.observe(inactive_psi, now=105.0, mode="enforce")
+    policy.observe(inactive_psi, now=110.0, mode="enforce")
+    assert len([w for w in warns if "cpu_psi" in w]) == 1, warns
+
+    inactive_ceiling = ctl.decide(
+        now=115.0, signals=signals(), settings=settings(),
+        ceiling=None, host_running=5)
+    assert inactive_ceiling.reason == "admission_inactive:ceiling"
+    policy.observe(inactive_ceiling, now=115.0, mode="enforce")
+    assert len(warns) == 2, warns  # one per distinct reason
+
+
+def test_log_policy_silent_in_off_mode():
+    """mode=off emits nothing at all (§5.1: off is today's dispatcher)."""
+    warns, infos = [], []
+    policy = ka.AdmissionLogPolicy(interval=60.0, warn=warns.append,
+                                   info=infos.append)
+    ctl = controller()
+    d = ctl.decide(now=100.0, signals=signals(),
+                   settings=settings(mode="off"), ceiling=64, host_running=5)
+    policy.observe(d, now=100.0, mode="off")
+    policy.observe(d, now=105.0, mode="off")
+    assert not warns and not infos

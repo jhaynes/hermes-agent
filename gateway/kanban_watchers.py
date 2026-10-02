@@ -59,7 +59,8 @@ async def _full_tick_admission(
     *,
     max_in_progress: Optional[int],
     live_kanban_config: dict,
-    clock=time.monotonic,
+    log_policy=None,
+    clock=None,
 ) -> "tuple[Optional[int], Optional[str], Optional[Any]]":
     """One full-tick admission decision (plan rev2 §5.2).
 
@@ -69,10 +70,16 @@ async def _full_tick_admission(
     mode the allowance flows into ``dispatch_once``. ``decision`` is the
     controller's Decision (for the status writer) or None when the live mode
     is off.
+
+    ``clock`` resolves ``time.monotonic`` at CALL time (None default): the
+    module attribute is a test seam, and a def-time default would freeze the
+    real function and make the injected fake clock invisible to pacing.
     """
     from hermes_cli import kanban_admission as _ka
     from hermes_cli import kanban_db_dispatch as _kbd
 
+    if clock is None:
+        clock = time.monotonic
     live = _ka.parse_admission_settings(live_kanban_config)
     if live.mode == "off":
         return None, None, None
@@ -81,6 +88,8 @@ async def _full_tick_admission(
     decision = controller.decide(
         clock(), signals, live, max_in_progress, host_running,
     )
+    if log_policy is not None:
+        log_policy.observe(decision, now=clock(), mode=live.mode)
     allowance = decision.allowance if live.mode == "enforce" else None
     return allowance, decision.reason, decision
 
@@ -340,18 +349,37 @@ class GatewayKanbanWatchersMixin:
         bad_ticks = 0
         last_warn_at = 0
         results: Optional[list] = None
+        sub_passes_last_interval = 0
         dispatcher = _KanbanDispatcher(_kb, settings)
 
         from hermes_cli import kanban_admission as _ka
         from hermes_cli import kanban_db_dispatch as _kbd
 
-        controller: Optional[_ka.AdmissionController] = None
-        status_writer: Optional[_ka.StatusWriter] = None
-        boot_settings = _ka.parse_admission_settings(kanban_cfg)
-        if boot_settings.mode != "off":
-            controller = _ka.AdmissionController(boot_settings)
-            status_writer = _ka.StatusWriter(_kb.kanban_home())
-            if settings.max_in_progress is None and boot_settings.mode != "off":
+        # The controller is ALWAYS constructed (R1 A1/F1/Q1/S-F2): a boot
+        # mode of ``off`` must not leave ``controller=None``, because the
+        # live re-read in _inter_tick_wait / _full_tick_admission can turn
+        # enforce on within one settle (§5.2 MoA B3, §6) — a None controller
+        # there crashed the watcher with AttributeError. mode:off remains a
+        # no-op because every decide/spawn site is gated on the LIVE mode.
+        controller = _ka.AdmissionController(_ka.parse_admission_settings(kanban_cfg))
+        status_writer = _ka.StatusWriter(_kb.kanban_home())
+        log_policy = _ka.AdmissionLogPolicy(
+            interval=interval, warn=logger.warning, info=logger.info)
+        anchor_settings = _ka.parse_admission_settings(self._live_kanban_config())
+        if anchor_settings.mode != "off":
+            try:
+                anchor_signals = _ka.read_host_signals()
+            except Exception:
+                anchor_signals = None
+            logger.info("%s", _ka.admission_anchor_line(
+                anchor_settings, ceiling=settings.max_in_progress,
+                signals=anchor_signals))
+            # §5.3 / MoA I12: when the ceiling in use is the memory-DERIVED
+            # default — kanban.max_in_progress null (or invalid) in config,
+            # so the effective cap is the 2..8 RAM-derived value (None where
+            # MemTotal is unreadable) — startup says so at WARNING so the
+            # operator knows how to grow it.
+            if _ka.live_configured_ceiling() is None:
                 logger.warning(
                     "kanban admission: ceiling=%s (derived; set "
                     "kanban.max_in_progress to grow further)",
@@ -375,6 +403,7 @@ class GatewayKanbanWatchersMixin:
                 if not _kanban_dispatch_allowed():
                     bad_ticks = 0
                 else:
+                    # Re-read the auto-decompose toggle live so disabling it
                     # takes effect on the next tick, not on restart.
                     _ad_enabled, _ad_per_tick = _resolve_auto_decompose_settings(_load_config)
                     # See #49638.
@@ -386,26 +415,31 @@ class GatewayKanbanWatchersMixin:
                     # but passes no allowance; enforce applies it.
                     allowance: Optional[int] = None
                     reason: Optional[str] = None
-                    if controller is not None:
-                        allowance, reason, decision = await _full_tick_admission(
-                            controller,
-                            max_in_progress=settings.max_in_progress,
-                            live_kanban_config=self._live_kanban_config(),
-                        )
-                        if decision is not None and status_writer is not None:
-                            live = _ka.parse_admission_settings(
-                                self._live_kanban_config())
-                            ceiling_configured = await _to_thread_process_service(
-                                _ka.live_configured_ceiling)
-                            status_writer.record_full_tick(decision, extra={
-                                "pid": os.getpid(),
-                                "mode": live.mode,
-                                "host_running": decision.host_running,
-                                "shadow_counters": controller.shadow_counters(),
-                                **_ka.status_fields(
-                                    decision,
-                                    ceiling_configured=ceiling_configured),
-                            })
+                    decision = None
+                    allowance, reason, decision = await _full_tick_admission(
+                        controller,
+                        # Single ceiling source (R1 arch A6): the dispatcher's
+                        # own settings — what _tick_spawn_budget actually
+                        # enforces — so a future live-settings swap (#117755)
+                        # changes BOTH decision sites together.
+                        max_in_progress=dispatcher.settings.max_in_progress,
+                        live_kanban_config=self._live_kanban_config(),
+                        log_policy=log_policy,
+                    )
+                    if decision is not None:
+                        live = _ka.parse_admission_settings(
+                            self._live_kanban_config())
+                        ceiling_configured = await _to_thread_process_service(
+                            _ka.live_configured_ceiling)
+                        status_writer.record_full_tick(decision, extra={
+                            "pid": os.getpid(),
+                            "mode": live.mode,
+                            "host_running": decision.host_running,
+                            "shadow_counters": controller.shadow_counters(),
+                            **_ka.status_fields(
+                                decision,
+                                ceiling_configured=ceiling_configured),
+                        })
 
                     results = await _to_thread_process_service(
                         lambda: dispatcher.tick_once(
@@ -417,12 +451,20 @@ class GatewayKanbanWatchersMixin:
                         len(getattr(res, "spawned", None) or [])
                         for _slug, res in (results or []) if res is not None
                     )
-                    if controller is not None and allowance is not None:
-                        controller.record(time.monotonic(), spawned_total)
-                    spawned_since_full_tick = spawned_total
+                    if allowance is not None and decision is not None:
+                        # Pacing stamps the DECISION time, never spawn
+                        # completion (§5.2 MoA B2, §5.7; R1 arch A3).
+                        controller.record(decision.now, spawned_total)
                     ready_pending = await _to_thread_process_service(dispatcher.ready_nonempty)
+                    # A full tick is not "bad" when any spawn happened since
+                    # the PREVIOUS full tick — sub-pass spawns included
+                    # (§5.2 MoA I4, R1 tests F2 / arch A2): the previous
+                    # interval's inter-tick wait reported what it spawned.
+                    spawned_since_full_tick = spawned_total + sub_passes_last_interval
+                    sub_passes_last_interval = 0
                     bad_ticks = _bad_tick_update(
                         ready_pending, any_spawned, spawned_since_full_tick, bad_ticks)
+                    ready_pending = None
                 now = int(time.time())
                 if bad_ticks >= _HEALTH_WINDOW and now - last_warn_at >= 300:
                     held = _kbd.describe_suppression(res for _slug, res in (results or []))
@@ -441,10 +483,16 @@ class GatewayKanbanWatchersMixin:
             except Exception:
                 logger.exception("kanban dispatcher: unexpected watcher error")
 
-            await self._inter_tick_wait(
+            # The inter-tick wait runs in EVERY mode (paused included — the
+            # pause gate inside it skips decisions but the interval pacing
+            # still applies), and reports how many workers its sub-passes
+            # spawned for the NEXT full tick's bad_ticks bookkeeping.
+            sub_passes_last_interval = await self._inter_tick_wait(
                 controller=controller,
                 dispatcher=dispatcher,
                 interval=interval,
+                status_writer=status_writer,
+                log_policy=log_policy,
             )
 
         self._release_kanban_dispatcher_lock()
@@ -455,19 +503,29 @@ class GatewayKanbanWatchersMixin:
         controller,
         dispatcher: _KanbanDispatcher,
         interval: float,
-    ) -> None:
+        status_writer=None,
+        log_policy=None,
+    ) -> int:
         """Wait between full ticks, running admission sub-passes (plan §5.2).
 
         The schedule is anchored to DECISION times, not spawn completion: a
         sub-pass grant paces the next sub-pass exactly like a full-tick grant.
-        Every mode uses this helper — with ``mode: off`` (or no controller) it
-        only re-reads settings at each check and never decides or spawns, so
-        switching off -> enforce takes effect within one ``settle_seconds``
-        (MoA B3 liveness).
+        Every mode uses this helper — with ``mode: off`` it only re-reads
+        settings at each check and never decides or spawns, so switching
+        off -> enforce takes effect within one ``settle_seconds`` (MoA B3
+        liveness).
 
-        Read order per check (§5.2): settings first (µs), then the pause gate,
-        then the admissible-work probe, then signals + host count only when a
-        sub-pass could actually spawn.
+        Returns the number of workers its sub-passes spawned, so the next
+        full tick's health telemetry (``bad_ticks``, MoA I4) can credit
+        them: a full tick is not "bad" when any spawn happened since the
+        PREVIOUS full tick, sub-passes included (R1 tests F2 / arch A2).
+
+        Read order per check (§5.2): sleep to the check first, then settings
+        (µs), then the pause gate, then the admissible-work probe, then
+        signals + host count only when a decision is needed. ``shadow``
+        decides at every check (never spawns, §5.1); a per-check exception
+        is logged and swallowed so one bad check can never kill the watcher
+        (R1 system F3).
         """
         from hermes_cli import kanban_admission as _ka
         from hermes_cli import kanban_db_dispatch as _kbd
@@ -479,15 +537,16 @@ class GatewayKanbanWatchersMixin:
         # check is what makes off -> enforce land within one settle (MoA B3).
         t_full = time.monotonic()
         next_full = t_full + max(interval, 1.0)
-        next_check: Optional[float] = None  # set from the LIVE settle below
+        # Seed the first check one settle after the full tick's decision
+        # (the full tick itself is the interval's first decision point).
+        seed = _ka.parse_admission_settings(self._live_kanban_config())
+        next_check = t_full + seed.settle_seconds
         latches: dict = {"nothing_admissible": False, "fingerprints": None}
+        sub_pass_spawned = 0
 
         while self._running:
             if time.monotonic() >= next_full:
-                return
-            live = _ka.parse_admission_settings(self._live_kanban_config())
-            if next_check is None:
-                next_check = t_full + live.settle_seconds
+                return sub_pass_spawned
             # Sleep in 1 s slices to the next check (or the full tick,
             # whichever comes first) so stop() never waits a full settle.
             wake_at = min(next_full, next_check)
@@ -497,46 +556,76 @@ class GatewayKanbanWatchersMixin:
                     break
                 await asyncio.sleep(min(1.0, slice_to))
             if not self._running or time.monotonic() >= next_full:
-                return
-            # This check's decision time anchors the next one.
-            next_check = time.monotonic() + live.settle_seconds
+                return sub_pass_spawned
+            # Settings are read FRESH at the check (§5.2: "settings =
+            # parse(live config)" — after the sleep, never before it), so a
+            # mode/pause/settle edit is seen at the NEXT check, within one
+            # settle of the edit (MoA B3). The grid re-derives from the LIVE
+            # settle, anchored to the scheduled check (not the wake time) so
+            # a late wake does not drift the grid forward.
+            live = _ka.parse_admission_settings(self._live_kanban_config())
+            next_check = next_check + live.settle_seconds
 
-            if live.mode != "enforce" or not _kanban_dispatch_allowed():
+            if live.mode == "off" or not _kanban_dispatch_allowed():
                 continue
-            if latches["nothing_admissible"]:
-                fingerprints = await _to_thread_process_service(
-                    dispatcher.board_fingerprints)
-                if fingerprints == latches["fingerprints"]:
+            try:
+                if latches["nothing_admissible"]:
+                    fingerprints = await _to_thread_process_service(
+                        dispatcher.board_fingerprints)
+                    if fingerprints == latches["fingerprints"]:
+                        continue
+                    # A board changed: re-arm and fall through to probe + decide.
+                    latches["nothing_admissible"] = False
+                    latches["fingerprints"] = None
+                if not await _to_thread_process_service(
+                        dispatcher.host_has_admissible_work):
                     continue
-                # A board changed: re-arm and fall through to probe + decide.
-                latches["nothing_admissible"] = False
-                latches["fingerprints"] = None
-            if not await _to_thread_process_service(dispatcher.host_has_admissible_work):
-                continue
-            signals = await _to_thread_process_service(_ka.read_host_signals)
-            host_running = await _to_thread_process_service(
-                _kbd.count_running_tasks_all_boards)
-            decision = controller.decide(
-                time.monotonic(), signals, live,
-                dispatcher.settings.max_in_progress, host_running,
-            )
-            if not decision.allowance:
-                continue
-            results = await _to_thread_process_service(
-                lambda: dispatcher.tick_once(
-                    spawn_allowance=decision.allowance,
-                    admission_reason=decision.reason,
-                    admission_only=True,
-                ))
-            spawned_total = sum(
-                len(getattr(res, "spawned", None) or [])
-                for _slug, res in (results or []) if res is not None
-            )
-            controller.record(decision.now, spawned_total)
-            if spawned_total == 0:
-                # A positive allowance spawned nothing: the probe's blind spot
-                # (respawn guards, per-profile caps — D10) is holding the whole
-                # backlog. Latch until the next full tick or a board change.
-                latches["nothing_admissible"] = True
-                latches["fingerprints"] = await _to_thread_process_service(
-                    dispatcher.board_fingerprints)
+                signals = await _to_thread_process_service(_ka.read_host_signals)
+                host_running = await _to_thread_process_service(
+                    _kbd.count_running_tasks_all_boards)
+                decision = controller.decide(
+                    time.monotonic(), signals, live,
+                    dispatcher.settings.max_in_progress, host_running,
+                )
+                if log_policy is not None:
+                    log_policy.observe(decision, now=time.monotonic(),
+                                       mode=live.mode)
+                if status_writer is not None:
+                    # §9 write rule: between full ticks, only LEVEL or
+                    # TRIGGER changes write (pacing flips don't).
+                    status_writer.maybe_write_transition(decision)
+                if live.mode == "shadow":
+                    # Shadow computes every decision on the sub-pass schedule
+                    # but NEVER spawns (§5.1, T29) — its counters must
+                    # predict enforce's cadence (R1 quality Q3 / arch A5).
+                    continue
+                if not decision.allowance:
+                    continue
+                results = await _to_thread_process_service(
+                    lambda: dispatcher.tick_once(
+                        spawn_allowance=decision.allowance,
+                        admission_reason=decision.reason,
+                        admission_only=True,
+                    ))
+                spawned_total = sum(
+                    len(getattr(res, "spawned", None) or [])
+                    for _slug, res in (results or []) if res is not None
+                )
+                sub_pass_spawned += spawned_total
+                controller.record(decision.now, spawned_total)
+                if spawned_total == 0:
+                    # A positive allowance spawned nothing: the probe's blind
+                    # spot (respawn guards, per-profile caps — D10) is holding
+                    # the whole backlog. Latch until the next full tick or a
+                    # board change.
+                    latches["nothing_admissible"] = True
+                    latches["fingerprints"] = await _to_thread_process_service(
+                        dispatcher.board_fingerprints)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One bad check (unreadable probe, a torn board DB, a bad
+                # config shape) must never kill the watcher (R1 system F3).
+                logger.exception(
+                    "kanban dispatcher: admission sub-pass check failed")
+        return sub_pass_spawned
