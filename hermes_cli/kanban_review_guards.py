@@ -83,7 +83,8 @@ def snapshot_matches(conn, attempt):
     if not row or not row[0]:
         return False
     def git(*args):
-        return subprocess.check_output(['git', '-C', row[0], *args], text=True,
+        return subprocess.check_output(['git', '-C', row[0], *args], text=True,  # windows-footgun: ok — encoding= on continuation line
+                                       encoding='utf-8', errors='replace',
                                        stderr=subprocess.DEVNULL, timeout=10).strip()
     try:
         return (git('rev-parse', 'HEAD') == attempt['target_sha']

@@ -78,7 +78,7 @@ def _replace(reference, content, expected_hash):
                             dir_fd=directory)
             os.close(directory)
             directory = child
-        with os.fdopen(os.open(reference.name, os.O_RDONLY | os.O_NOFOLLOW,
+        with os.fdopen(os.open(reference.name, os.O_RDONLY | os.O_NOFOLLOW,  # windows-footgun: ok — binary mode (rb), no text decoding
                                dir_fd=directory), 'rb') as handle:
             if digest(handle.read(1024 * 1024 + 1)) != expected_hash:
                 raise ValueError('stale procedural reference hash at replacement')

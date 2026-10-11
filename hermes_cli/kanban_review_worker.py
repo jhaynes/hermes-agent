@@ -84,7 +84,8 @@ def before_model_request(agent, request):
         workspace = Path(task['workspace_path']).resolve()
         owner_path = conn.execute('SELECT workspace_path FROM tasks WHERE id=?', (attempt['task_id'],)).fetchone()[0]
         def git(*args):
-            result = subprocess.run(['git','-C',str(workspace),*args],capture_output=True,text=True,timeout=10,check=True)
+            result = subprocess.run(['git','-C',str(workspace),*args],capture_output=True,text=True,  # windows-footgun: ok — encoding= on continuation line
+                                    encoding='utf-8',errors='replace',timeout=10,check=True)
             return result.stdout.strip()
         isolated = (workspace == Path.cwd().resolve() and owner_path and workspace != Path(owner_path).resolve()
                     and git('rev-parse','HEAD') == attempt['target_sha']
