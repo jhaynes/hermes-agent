@@ -106,6 +106,17 @@ def _with_board_pinned(board: Optional[str], fn: Callable[[], Any]) -> Any:
         return fn()
 
 
+class ReviewReadinessBody(BaseModel):
+    challenge_id: str
+
+
+@router.post('/review-readiness')
+def review_readiness(payload: ReviewReadinessBody, board: Optional[str] = _BOARD_Q):
+    from hermes_cli.kanban_review_readiness import issue
+    with _value_error_400(), _board_conn(board) as (_, conn):
+        return issue(conn, payload.challenge_id, 'dashboard')
+
+
 def _require(getter: Callable, conn: sqlite3.Connection, ident, label: str):
     obj = getter(conn, ident)
     if obj is None:

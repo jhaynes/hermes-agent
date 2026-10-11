@@ -135,7 +135,12 @@ class GatewayControlServer:
         self._bind_path: Optional[Path] = None
         self._pointer_file: Optional[Path] = None
         self._handlers: dict[str, Callable[..., dict[str, Any]]] = {
-            "identify": build_identify_payload, "status": build_status_payload, **(verb_handlers or {})}
+            "identify": build_identify_payload, "status": build_status_payload,
+            "review-readiness": self._review_readiness, **(verb_handlers or {})}
+
+    def _review_readiness(self, params):
+        from hermes_cli.kanban_review_readiness import gateway_issue
+        return gateway_issue(self._home, params)
 
     async def start(self) -> bool:
         """Bind and start serving. Returns True on success, False otherwise."""

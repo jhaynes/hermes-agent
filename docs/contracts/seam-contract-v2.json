@@ -1,0 +1,879 @@
+{
+  "contract": {
+    "name": "seam-contract",
+    "version": 2,
+    "status": "frozen",
+    "frozen_by": "U0 (task t_9b97698a)",
+    "frozen_at_plan_sha256": "1f7cd6d13c65457581d84e8f30810549f177cdea9c2a9c18462b668183ec5e7e",
+    "supersedes": "seam-contract/1 (implicit, never frozen as a document)",
+    "amendment_rule": "Amendments are recorded as decisions with the contract version bumped and the digest recomputed. U6 judges against a specific contract SHA."
+  },
+  "candidate_pin": {
+    "base_commit": "e2427daf3d7f5ef90b0dc196d89fee4a2debb0d4",
+    "base_branch": "backup/bounded-review-feedback",
+    "repo": "jhaynes/hermes-agent",
+    "phase_a_receipt_sha256": "78287727b9281e5d8a7ce4bb8c19da6ffc8753c8c8d455a589cff73cf199b200",
+    "phase_a_verdict": "candidate_seam_contract_failed",
+    "contract_gaps_at_phase_a": [
+      "C1 gap: no configurable termination_reserve_seconds (deadline hard-derived time.time()+cap, kanban_review_state.py:169)",
+      "C2 gap: no verified process-group identity (group exists via start_new_session but never verified/recorded/enumerated)",
+      "C3 gap: no native cohort export with generation/watermark/completeness fields or finalized-through fence",
+      "C4 gap: review_actions.deadline is wall-clock, not boot-scoped monotonic with half-open not_before/expires_at",
+      "C5 gap: no armed->released command-release token; arming and release are the same dispatcher tick"
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "C1",
+      "title": "Configurable termination reserve",
+      "plan_v2_basis": "plan v2:147 (launcher subtracts reserve from both enforcement boundaries), 472 (config source, two-stage validation), 474 (insufficient_safe_window)",
+      "caller": {
+        "who": "the gated launcher (C5) and the supervisor; the config loader at kanban.review_feedback is the single source. Harness-side read lives in hermes-config Phase B slices, not the candidate.",
+        "module_surface": "kanban_review_state.py config path; launcher/supervisor deadline construction"
+      },
+      "preconditions": [
+        "(a) at config load \u2014 `termination_reserve_seconds` is a finite positive integer, and smaller than every issuable lease/cap duration",
+        "(b) at every lease issuance \u2014 `remaining > reserve`."
+      ],
+      "atomic_persistence": "the effective reserve value is recorded per action in the lease/receipt row in the same claim transaction that issues the lease. Config changes apply only to actions reserved after the change \u2014 never retroactively; receipts keep the value each action actually used.",
+      "generation_watermark": "n/a.",
+      "idempotency": "re-reading config does not rewrite recorded reserves; an action's recorded reserve is immutable once issued.",
+      "typed_failures": [
+        "invalid_reserve_config",
+        "insufficient_safe_window",
+        "reserve_exceeds_boundary"
+      ],
+      "readback": "the per-action recorded reserve is visible in the lease/receipt row via the supported export; the harness reads the effective value, never the config default.",
+      "probes": [
+        "U1-config-validation",
+        "U1-insufficient-window",
+        "U1-boundary-subtraction",
+        "U1-reserve-recorded-per-action",
+        "U1-default-60"
+      ],
+      "implementation_unit": "U1"
+    },
+    {
+      "id": "C2",
+      "title": "Verified process-group containment",
+      "plan_v2_basis": "plan v2:200 (mandatory proof cases), plan v2:23 (setsid residual accepted, detected and recorded, never claimed prevented)",
+      "caller": {
+        "who": "the supervisor/dispatcher supervision path only. start_new_session=True is kept - it is deliberate and already gives the launcher/worker a private session and process group.",
+        "module_surface": "kanban_db_dispatch.py spawn path; supervisor in kanban_review_state.py"
+      },
+      "preconditions": [
+        "the spawned launcher/worker pgid is verified to match the recorded pid and its start identity before any signal may be sent to the group",
+        "killpg invariants hold fail-closed \u2014 never signal pgid <= 1, never signal the supervisor's own group, never signal a group whose recorded (pid, start identity) no longer matches the live check."
+      ],
+      "atomic_persistence": "pgid + leader start identity persist in the `armed` transaction (with C5), not at spawn time alone.",
+      "generation_watermark": "n/a.",
+      "idempotency": "survivor enumeration is a read; repeated scans are idempotent. Re-verification at signal time is mandatory, not cached.",
+      "typed_failures": [
+        "containment_identity_mismatch",
+        "self_group_refused",
+        "survivors_recorded"
+      ],
+      "readback": "recorded group identity and survivor lists are visible in the receipt/watchdog row via the supported export.",
+      "probes": [
+        "U2-pgid-verified-at-arm",
+        "U2-child-grandchild",
+        "U2-shell-wrapper",
+        "U2-ignored-sigterm",
+        "U2-parent-exit",
+        "U2-supervisor-death-after-release",
+        "U2-pid-reuse-deterministic",
+        "U2-stale-group-reuse-deterministic",
+        "U2-self-group-refused",
+        "U2-survivor-enumeration"
+      ],
+      "implementation_unit": "U2"
+    },
+    {
+      "id": "C3",
+      "title": "Cohort generation/watermark export and finalization fence",
+      "plan_v2_basis": "plan v2:182 (watermark = authorization sequence; finalization fence), plan v2:86 (board identity anchor), plan v2:202 (native atomic admission fence; four race cases)",
+      "caller": {
+        "who": "the managed-claim transaction allocates the authorization sequence; a single native finalization op is the only fence writer; the read-only export is available to the config harness/validator.",
+        "module_surface": "kanban_review_cohort.py + managed-claim transaction in kanban_review_state.py"
+      },
+      "preconditions": [
+        "export ordering is fixed and tested: sequence allocation -> claim commit -> export snapshot (one complete read of committed state) -> finalization (fixes `finalized_through` and `exhausted_at`) -> receipt eligibility."
+      ],
+      "atomic_persistence": "finalization is ONE transaction: disables further cohort claims, includes every committed claim through the watermark, fixes the complete generation and `exhausted_at`, marks receipt eligibility pending/settled. Isolation: `BEGIN IMMEDIATE` / single-writer semantics on the board DB; claim-vs-fence tests run across separate OS processes, not threads.",
+      "generation_watermark": "native cohort exports carry: board identity (`workflow_board.board_id` paired with canonical DB path + filesystem device recorded at creation), authorization sequence (allocated in the managed-claim transaction), export generation, `finalized_through` watermark, completeness flag. An earlier-starting sibling committed before the fence but closed late keeps finalization pending (plan v2:182).",
+      "idempotency": "repeating a finalization for the same generation returns the same finalized record; a post-fence claim fails the fence. A copied DB at a different canonical path/device is rejected; a legitimately restored board re-identifies only via a new operator decision record naming the restore (same authority class as enrollment); otherwise path/device mismatch holds.",
+      "typed_failures": [
+        "cohort_claim_fenced",
+        "board_identity_mismatch",
+        "finalization_pending",
+        "partial_observation"
+      ],
+      "readback": "the cohort export is the supported read-only path carrying identity + generation + watermark + completeness; `show --json` disagreement can only place the projection in `reconciliation_required`, never alter native state.",
+      "probes": [
+        "U3-export-fields",
+        "U3-export-ordering",
+        "U3-committed-not-exported",
+        "U3-concurrent-claim-vs-fence",
+        "U3-post-fence-claim-refused",
+        "U3-finalization-vs-exhaustion",
+        "U3-copied-db-rejected",
+        "U3-restore-needs-decision"
+      ],
+      "implementation_unit": "U3"
+    },
+    {
+      "id": "C4",
+      "title": "Boot-scoped monotonic lease bounds",
+      "plan_v2_basis": "plan v2:145 (one boot-scoped monotonic domain; cross-boot comparisons illegal), plan v2:147 (boundary rules), plan v2:213 (timeout = min of command cap, lease remaining, allowance remaining)",
+      "caller": {
+        "who": "the launcher (deadline construction and every comparison) and the supervisor (enforcement boundaries); every deadline comparison in the review seam is replumbed to this domain.",
+        "module_surface": "kanban_review_state.py claimed()/settle_clock(); launcher deadline construction"
+      },
+      "preconditions": [
+        "lease `not_before`/`expires_at`, command start/finish, and `exhausted_at` all persist in one boot-scoped monotonic domain",
+        "wall time is audit/correlation only. Clock choice (frozen): `CLOCK_BOOTTIME` via `time.clock_gettime(time.CLOCK_BOOTTIME)` \u2014 monotonic-including-suspend",
+        "Python's `time.monotonic()` excludes suspend on Linux and would undercharge a suspended host. Boot identity source: `/proc/sys/kernel/random/boot_id`."
+      ],
+      "atomic_persistence": "lease bounds persist in the claim transaction (with C5's `claimed_unarmed` persistence); command start/finish endpoints persist at observation.",
+      "generation_watermark": "`exhausted_at` participates in the C3 finalization fence.",
+      "idempotency": "replayed endpoints are idempotent; a previously trusted open prefix is never lowered by a later earlier endpoint \u2014 high-water retained, discrepancy recorded, hold for reconciliation.",
+      "typed_failures": [
+        "cross_boot_comparison",
+        "clock_reconciliation_required",
+        "boot_discontinuity",
+        "insufficient_safe_window"
+      ],
+      "readback": "lease bounds and endpoints read back in the monotonic domain via the lease row/export; wall timestamps ride along as audit only. Legacy `deadline` values are read as wall history and never reinterpreted as monotonic bounds (migration, plan v3).",
+      "probes": [
+        "U4-boottime-domain",
+        "U4-half-open-start",
+        "U4-half-open-finish",
+        "U4-exhaustion-boundary",
+        "U4-monotonic-decrease-hold",
+        "U4-boot-change-sweep",
+        "U4-lease-vs-exhaustion-independence"
+      ],
+      "implementation_unit": "U4"
+    },
+    {
+      "id": "C5",
+      "title": "Armed/released command-release token state machine",
+      "plan_v2_basis": "plan v2:82 (durable fail-closed state machine; recovery rules), plan v2:84 (projection failure before/after release), plan v2:200 (verify/record/arm before release), plan v3 gated-launcher section (release mechanism, frozen here by reference)",
+      "caller": {
+        "who": "the dispatcher managed-claim path is the only actor that advances states; the gated launcher is the only executor.",
+        "module_surface": "kanban_review_state.py action states; kanban_db_dispatch.py spawn path (gated launcher)"
+      },
+      "preconditions": [
+        "only the original verified `released` state may execute",
+        "the command-release token is persisted separately from the run claim",
+        "enrollment is an explicit durable predicate (`enrolled` marker persisted at reservation, default absent/false for legacy rows), so \"non-managed claim paths rejected for enrolled tasks\" has a defined key."
+      ],
+      "atomic_persistence": "the `armed` transaction persists verified group identity + watchdog record + state; token issuance is separate and follows projection verification.",
+      "generation_watermark": "n/a directly; the action participates in the C3 cohort watermark.",
+      "idempotency": "token replay is idempotent (a second delivery of the same token does not re-launch or re-arm).",
+      "typed_failures": [
+        "crash_before_release",
+        "orphaned_launcher",
+        "projection_failure_pre_release",
+        "non_managed_claim_refused",
+        "revoked_settled"
+      ],
+      "readback": "action state, token-present flag (not the token), armed group identity, and watchdog record are visible via the supported export; the token itself is never part of any export.",
+      "probes": [
+        "U5-state-machine-boundaries",
+        "U5-crash-at-every-transition",
+        "U5-token-replay-idempotent",
+        "U5-orphaned-launcher-recovery",
+        "U5-armed-no-token-recovery",
+        "U5-projection-failure-pre-release",
+        "U5-projection-failure-post-release",
+        "U5-non-managed-claim-refused",
+        "U5-recovery-from-armed-revokes"
+      ],
+      "implementation_unit": "U5"
+    }
+  ],
+  "probes": [
+    {
+      "id": "BASE-checkout-clean",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "detached disposable worktree at the exact pinned commit, clean tree",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P0-checkout"
+    },
+    {
+      "id": "BASE-module-roots",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "imported module roots resolve inside the candidate worktree",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P0-roots"
+    },
+    {
+      "id": "BASE-temp-board",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "temporary board initialized with immutable `workflow_board.board_id`",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P0-board"
+    },
+    {
+      "id": "BASE-claim-refused",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "claim with no reserved action refused before command execution",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P9-manual-claim-refused"
+    },
+    {
+      "id": "BASE-claim-ordering",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "reserved action -> transactional claim opens run and binds action to run",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P9-claim-ordering"
+    },
+    {
+      "id": "BASE-dup-claim-refused",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "second/foreign claim of the enrolled task refused while the run is open",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P9-duplicate-claim-refused"
+    },
+    {
+      "id": "BASE-stale-cas-refused",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "reserve with stale attempt version loses the CAS and is refused",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P9-stale-generation-refused"
+    },
+    {
+      "id": "BASE-identity-at-claim",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "claimed event binds immutable board/task/run/lock identity in the claim txn",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P1-identity-at-claim"
+    },
+    {
+      "id": "BASE-clock-checkpoint",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "persisted boot/monotonic/wall checkpoint paired in `review_clock`",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P2-clock-checkpoint"
+    },
+    {
+      "id": "BASE-discontinuity-hold",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "monotonic decrease/backward clock enters `clock_reconciliation_required` hold",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P2-discontinuity-hold"
+    },
+    {
+      "id": "BASE-gap-charges-zero",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "active time charges the open-run union; a 30s idle gap adds zero",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P3-gap-charges-zero"
+    },
+    {
+      "id": "BASE-equality-exhausts",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "union consumption at exact allowance exhausts authority (held)",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P3-equality-exhausts"
+    },
+    {
+      "id": "BASE-exhausted-no-admission",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "exhausted lineage refuses new admission (claims fenced)",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P3-exhausted-no-admission"
+    },
+    {
+      "id": "BASE-lease-bounds",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "per-action lease deadline persisted at claim; cap bounded by remaining active allowance",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P4-lease-bounds"
+    },
+    {
+      "id": "BASE-late-completion-denied",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "completion at/after the action lease deadline cannot advance state",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P4-late-completion-denied"
+    },
+    {
+      "id": "BASE-release-settlement",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "release (review handoff) closes the action and the run row (authoritative close endpoint)",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P5-release-settlement"
+    },
+    {
+      "id": "BASE-failure-settlement",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "crash/failed outcome settles the action failed without refund",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P5-failure-settlement"
+    },
+    {
+      "id": "BASE-recovery-reservation",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "replacement after failure consumes the recovery reservation (new action id)",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P5-recovery-reservation"
+    },
+    {
+      "id": "BASE-no-second-lease",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "primary repeat for the same action refused (no silent second lease)",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P5-no-second-lease"
+    },
+    {
+      "id": "BASE-supervisor-termination",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "at union exhaustion the supervisor holds the lineage and cooperatively terminates the live worker process",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P6-supervisor-termination"
+    },
+    {
+      "id": "BASE-revocation-deadline",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "supervision deadline map zeroes revoked lineages",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P6-revocation-deadline"
+    },
+    {
+      "id": "BASE-setsid-residual-recorded",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "setsid/double-fork escape observed and recorded as the accepted residual; local quiescence proof refused",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P6-setsid-residual-recorded"
+    },
+    {
+      "id": "BASE-readonly-export",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "supported `hermes kanban show <task> --json` export works against the temporary board without direct DB access",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P7-readonly-export"
+    },
+    {
+      "id": "BASE-state-machine",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "native lifecycle walks reserved -> running -> complete/settled through one managed claim path",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P8-state-machine"
+    },
+    {
+      "id": "BASE-unmanaged-write-refused",
+      "capability": "baseline",
+      "kind": "behavioral",
+      "expected_result": "direct SQL status mutation of an enrolled task refused by the persistent guard trigger",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux",
+      "phase_a_evidence": "Phase A receipt probe P8-unmanaged-write-refused"
+    },
+    {
+      "id": "U0-contract-diff",
+      "capability": "U0 contract/suite sanity",
+      "kind": "environmental",
+      "expected_result": "machine-diff contract probe IDs vs receipt probe IDs yields zero missing/extra \u2014 mechanical, no judgment.",
+      "domain": "contract/tooling check, host-agnostic"
+    },
+    {
+      "id": "U0-concurrency-scaffolding",
+      "capability": "U0 contract/suite sanity",
+      "kind": "environmental",
+      "expected_result": "`test_recovery_and_claim_are_atomic_across_processes` re-run with explicit PYTHONPATH inheritance in its scaffolding; expected: passes under the fixed scaffolding, re-classified as a scaffolding fix rather than an environmental waiver. If it still fails after the scaffolding fix, it is a real defect and blocks.",
+      "domain": "contract/tooling check, host-agnostic"
+    },
+    {
+      "id": "U1-config-validation",
+      "capability": "C1 configurable termination reserve",
+      "kind": "capability",
+      "expected_result": "a non-positive, non-integer, non-finite, or lease-exceeding `termination_reserve_seconds` at config load raises the typed `invalid_reserve_config` refusal; a valid default of 60 loads.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U1-insufficient-window",
+      "capability": "C1 configurable termination reserve",
+      "kind": "capability",
+      "expected_result": "remaining allowance <= reserve at issuance produces typed `insufficient_safe_window` \u2014 no lease, lineage parked, never rounded into extra execution.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U1-boundary-subtraction",
+      "capability": "C1 configurable termination reserve",
+      "kind": "capability",
+      "expected_result": "the launcher never starts a command whose timeout plus reserve reaches the action-lease or union-cap boundary (typed `reserve_exceeds_boundary` refusal attempt is observable).",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U1-reserve-recorded-per-action",
+      "capability": "C1 configurable termination reserve",
+      "kind": "capability",
+      "expected_result": "the reserve actually used is recorded in the lease/receipt row at claim and survives a config change between actions (later action uses the new value; earlier receipt keeps the old).",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U1-default-60",
+      "capability": "C1 configurable termination reserve",
+      "kind": "capability",
+      "expected_result": "absent config, the effective reserve is 60 and appears in the receipt as 60.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-pgid-verified-at-arm",
+      "capability": "C2 verified process-group containment",
+      "kind": "capability",
+      "expected_result": "the dispatcher verifies `getpgid(launcher_pid) == launcher_pid` plus start identity and persists them in the `armed` transaction; a mismatch is typed `containment_identity_mismatch` before any signal exists.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-child-grandchild",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "a reviewer command that spawns a child that spawns a grandchild is terminated via the verified group (graceful then SIGKILL inside the reserve); all three processes observed gone; survivor enumeration returns empty.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-shell-wrapper",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "a shell wrapper re-exec/child path is contained by the group; survivors enumerated as empty after escalation.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-ignored-sigterm",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "a process ignoring SIGTERM is escalated with SIGKILL inside the reserve; observed gone by the reserve boundary.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-parent-exit",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "a child that outlives its direct parent is still found by the `/proc` scan (pgid/session match) and terminated.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-supervisor-death-after-release",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "dispatcher death after release leaves the launcher's own timeout bounding the command; the next dispatcher recovery re-arms supervision from the persisted watchdog record and settles/revoles as appropriate \u2014 no unbounded execution.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-pid-reuse-deterministic",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "recorded (pid, start identity) cycled against a live group with a stale identity produces typed `containment_identity_mismatch` and NO signal \u2014 deterministic scaffolding, no scheduler race.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-stale-group-reuse-deterministic",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "a recorded group whose leader exited, with the pgid potentially reused, is refused (`containment_identity_mismatch`); the `/proc` scan confirms the live group does not match the recorded leader start identity.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-self-group-refused",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "an attempt to signal the supervisor's own pgid (or pgid <= 1) is refused \u2014 named probe, typed refusal, no signal sent.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U2-survivor-enumeration",
+      "capability": "C2 verified process-group containment",
+      "kind": "adversarial",
+      "expected_result": "forced survivors (a process that escaped graceful termination) are enumerated by the `/proc` scan and recorded in the receipt before SIGKILL escalation.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-export-fields",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "capability",
+      "expected_result": "a native cohort export carries board identity, authorization sequence, export generation, `finalized_through`, and completeness flag; all present and consistent with the claim history.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-export-ordering",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "capability",
+      "expected_result": "sequence allocation -> claim commit -> export snapshot -> finalization -> receipt eligibility is observed in that order; an export never contains an uncommitted claim.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-committed-not-exported",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "capability",
+      "expected_result": "a run committed before the fence but exported/closed late keeps finalization pending (typed `finalization_pending`) \u2014 state advancement is deferred, not skipped.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-concurrent-claim-vs-fence",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "concurrency",
+      "expected_result": "a claim racing finalization either commits before (appears in the generation) or fails after the fence (`cohort_claim_fenced`) \u2014 tested across separate OS processes.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-post-fence-claim-refused",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "capability",
+      "expected_result": "a claim after finalization is refused by the fence.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-finalization-vs-exhaustion",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "concurrency",
+      "expected_result": "finalization racing exhaustion fixes `exhausted_at` consistently; a receipt finishing before `exhausted_at` stays eligible; equality denies advancement.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-copied-db-rejected",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "capability",
+      "expected_result": "the board DB copied to a different canonical path/device with the same `board_id` is rejected (`board_identity_mismatch`).",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U3-restore-needs-decision",
+      "capability": "C3 cohort generation/watermark export and finalization fence",
+      "kind": "capability",
+      "expected_result": "a legitimately restored board re-identifies only via a new operator decision record naming the restore; without it, path/device mismatch holds.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-boottime-domain",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "capability",
+      "expected_result": "lease bounds/endpoints persist via `CLOCK_BOOTTIME` and boot identity from `/proc/sys/kernel/random/boot_id`; wall columns hold audit time only.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-half-open-start",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "boundary",
+      "expected_result": "start exactly at `not_before` is allowed.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-half-open-finish",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "boundary",
+      "expected_result": "finish exactly at `expires_at` is late (denied); strictly before is accepted.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-exhaustion-boundary",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "boundary",
+      "expected_result": "state-advancing finish exactly at/after `exhausted_at` denied; strictly before accepted; equality of consumption and allowance exhausts.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-monotonic-decrease-hold",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "capability",
+      "expected_result": "observed monotonic decrease enters `clock_reconciliation_required`.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-boot-change-sweep",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "capability",
+      "expected_result": "a boot-ID change revokes and settles every prior-boot open action as uncertain (never refunded, never relaunched), records the discontinuity in receipts, and holds new admissions pending operator reconciliation \u2014 the hold has an exit.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U4-lease-vs-exhaustion-independence",
+      "capability": "C4 boot-scoped monotonic lease bounds",
+      "kind": "capability",
+      "expected_result": "an unexpired lease cannot authorize work after exhaustion (lease validity and cumulative exhaustion are independent gates).",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-state-machine-boundaries",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "the durable states walk `reserved -> claimed_unarmed -> armed -> released -> revoked/settled`; at `claimed_unarmed` no reviewer process exists; at `armed` a verified live group + watchdog record exist; the token is written only after the `armed` commit + projection verification.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-crash-at-every-transition",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "adversarial",
+      "expected_result": "injected crash at each transition boundary prevents command release (no state allows recovery-to-launch).",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-token-replay-idempotent",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "adversarial",
+      "expected_result": "replaying the same release token does not re-launch or re-arm; a second launcher is never spawned for the same action.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-orphaned-launcher-recovery",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "a launcher orphaned between spawn and `armed` commit (no persisted armed identity) is killed by the next dispatcher pass having executed nothing; action failed/cancelled, never launched.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-armed-no-token-recovery",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "an armed record whose token never arrived is recovered the same way (killed, never launched).",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-projection-failure-pre-release",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "projection failure before release withholds the token and triggers native revocation.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-projection-failure-post-release",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "projection failure after release cannot override the native cap \u2014 execution stays bounded, result permanently non-approvable.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-non-managed-claim-refused",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "non-managed claim paths (manual/foreign/legacy) are rejected for enrolled tasks keyed on the durable `enrolled` marker; legacy rows default to unenrolled.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    },
+    {
+      "id": "U5-recovery-from-armed-revokes",
+      "capability": "C5 armed/released command-release token state machine",
+      "kind": "capability",
+      "expected_result": "dispatcher recovery finding `armed`-after-release revokes and settles rather than re-launching.",
+      "domain": "isolated temp HERMES_HOME + temp board on tower; Linux-only"
+    }
+  ],
+  "traceability": [
+    {
+      "plan_ref": ":82 (state machine, recovery rules)",
+      "clause": "C5",
+      "probes": [
+        "U5-state-machine-boundaries",
+        "U5-crash-at-every-transition",
+        "U5-orphaned-launcher-recovery",
+        "U5-recovery-from-armed-revokes",
+        "BASE-state-machine"
+      ],
+      "unit": "U5"
+    },
+    {
+      "plan_ref": ":84 (projection before/after release)",
+      "clause": "C5",
+      "probes": [
+        "U5-projection-failure-pre-release",
+        "U5-projection-failure-post-release"
+      ],
+      "unit": "U5"
+    },
+    {
+      "plan_ref": ":86 (board identity anchor, exports carry identity/generation/completeness)",
+      "clause": "C3",
+      "probes": [
+        "U3-export-fields",
+        "U3-copied-db-rejected",
+        "U3-restore-needs-decision"
+      ],
+      "unit": "U3"
+    },
+    {
+      "plan_ref": ":145 (one monotonic domain, cross-boot illegal)",
+      "clause": "C4",
+      "probes": [
+        "U4-boottime-domain",
+        "U4-monotonic-decrease-hold",
+        "U4-boot-change-sweep"
+      ],
+      "unit": "U4"
+    },
+    {
+      "plan_ref": ":147 (boundary rules, reserve subtraction, timeout min)",
+      "clause": "C1+C4",
+      "probes": [
+        "U4-half-open-start",
+        "U4-half-open-finish",
+        "U4-exhaustion-boundary",
+        "U1-boundary-subtraction"
+      ],
+      "unit": "U1+U4"
+    },
+    {
+      "plan_ref": ":182 (watermark/sequence, fence, late sibling)",
+      "clause": "C3",
+      "probes": [
+        "U3-export-ordering",
+        "U3-committed-not-exported",
+        "U3-concurrent-claim-vs-fence",
+        "U3-post-fence-claim-refused"
+      ],
+      "unit": "U3"
+    },
+    {
+      "plan_ref": ":196 (operator reconciliation authority class)",
+      "clause": "C3",
+      "probes": [
+        "U3-restore-needs-decision"
+      ],
+      "unit": "U3"
+    },
+    {
+      "plan_ref": ":198 (integrity boundary, TOCTOU residual framing)",
+      "clause": "C2+C5",
+      "probes": [
+        "U2-pgid-verified-at-arm",
+        "U5-token-replay-idempotent"
+      ],
+      "unit": "U5+U2"
+    },
+    {
+      "plan_ref": ":200 (supervisor proof cases, setsid residual)",
+      "clause": "C2",
+      "probes": [
+        "U2-child-grandchild",
+        "U2-shell-wrapper",
+        "U2-ignored-sigterm",
+        "U2-parent-exit",
+        "U2-supervisor-death-after-release",
+        "U2-pid-reuse-deterministic",
+        "U2-stale-group-reuse-deterministic",
+        "U2-self-group-refused",
+        "U2-survivor-enumeration",
+        "BASE-setsid-residual-recorded"
+      ],
+      "unit": "U2"
+    },
+    {
+      "plan_ref": ":202 (finalization = native fence; four race cases)",
+      "clause": "C3",
+      "probes": [
+        "U3-committed-not-exported",
+        "U3-concurrent-claim-vs-fence",
+        "U3-post-fence-claim-refused",
+        "U3-finalization-vs-exhaustion"
+      ],
+      "unit": "U3"
+    },
+    {
+      "plan_ref": ":213 (timeout = min of caps)",
+      "clause": "C4+U2",
+      "probes": [
+        "U2-supervisor-death-after-release"
+      ],
+      "unit": "U4+U2"
+    },
+    {
+      "plan_ref": ":23 (setsid accepted residual)",
+      "clause": "C2",
+      "probes": [
+        "BASE-setsid-residual-recorded"
+      ],
+      "unit": "existing"
+    },
+    {
+      "plan_ref": ":282 (operator reconciliation receipt exits holds)",
+      "clause": "C4",
+      "probes": [
+        "U4-boot-change-sweep"
+      ],
+      "unit": "U4"
+    },
+    {
+      "plan_ref": ":472 (config source + validation, harness constants)",
+      "clause": "C1",
+      "probes": [
+        "U1-config-validation",
+        "U1-default-60"
+      ],
+      "unit": "U1"
+    },
+    {
+      "plan_ref": ":474 (insufficient_safe_window)",
+      "clause": "C1",
+      "probes": [
+        "U1-insufficient-window"
+      ],
+      "unit": "U1"
+    },
+    {
+      "plan_ref": "plan v2:176 (reserve recorded per action, no retroactive config)",
+      "clause": "C1",
+      "probes": [
+        "U1-reserve-recorded-per-action",
+        "U1-default-60"
+      ],
+      "unit": "U1"
+    },
+    {
+      "plan_ref": "plan v3 (enrolled marker durable)",
+      "clause": "C5",
+      "probes": [
+        "U5-non-managed-claim-refused",
+        "BASE-unmanaged-write-refused"
+      ],
+      "unit": "U5"
+    },
+    {
+      "plan_ref": "plan v3 (gated launcher orphans)",
+      "clause": "C5",
+      "probes": [
+        "U5-orphaned-launcher-recovery",
+        "U5-armed-no-token-recovery"
+      ],
+      "unit": "U5"
+    },
+    {
+      "plan_ref": "Phase A receipt (suite baseline environmental exception)",
+      "clause": "U0",
+      "probes": [
+        "U0-concurrency-scaffolding"
+      ],
+      "unit": "U0"
+    },
+    {
+      "plan_ref": "plan v3 (machine-checkable contract)",
+      "clause": "U0",
+      "probes": [
+        "U0-contract-diff"
+      ],
+      "unit": "U0"
+    }
+  ]
+}

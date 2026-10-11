@@ -22,6 +22,7 @@ from hermes_cli import kanban_db_dispatch as kbd
 from hermes_cli import kanban_db_workspace as kbw
 from hermes_cli import kanban_db_notify as kbn
 from hermes_cli import kanban_swarm as ks
+from hermes_cli import kanban_review_ops as _review_ops
 from hermes_cli.kanban_output import (
     _ATTACHMENT_FIELDS, _RUNS_RUN_FIELDS, _SHOW_RUN_FIELDS, _bulk_apply, _err,
     _fmt_counts, _fmt_task_line, _fmt_ts, _json_out, _obj_dict, _print_json,
@@ -487,6 +488,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
         runs = kb.list_runs(conn, args.task_id, **rsk)
         # Workers hand off via task_runs.summary; tasks.result stays NULL unless set.
         latest_summary = kb.latest_summary(conn, args.task_id)
+        from hermes_cli.kanban_review_output import workflow_details
+        workflow = workflow_details(conn, args.task_id)
         if not want_json:
             graph = kb.task_graph_context(conn, task.id)
 
@@ -496,6 +499,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
             "comments": [_obj_dict(c, ("author", "body", "created_at")) for c in comments],
             "events": [_obj_dict(e, ("kind", "payload", "created_at", "run_id")) for e in events],
             "runs": [_obj_dict(r, _SHOW_RUN_FIELDS) for r in runs],
+            "workflow": workflow,
         })
         return 0
 
@@ -1221,7 +1225,9 @@ def _cmd_runs(args: argparse.Namespace) -> int:
         return rc
     with kbc.connect_closing() as conn:
         runs = kb.list_runs(conn, args.task_id, **rsk)
-    if _json_out(args, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs]):
+        from hermes_cli.kanban_review_output import annotate_runs
+        payload = annotate_runs(conn, args.task_id, [_obj_dict(r, _RUNS_RUN_FIELDS) for r in runs])
+    if _json_out(args, payload):
         return 0
     if not runs:
         print(f"(no runs yet for {args.task_id})")
@@ -1317,6 +1323,9 @@ def _cmd_decompose(args: argparse.Namespace) -> int:
 
 
 _HANDLERS = {
+    "enroll-review": _review_ops.enroll,
+    "reserve-review-action": _review_ops.reserve,
+    "start-review-cohort": _review_ops.cohort,
     "init": _cmd_init, "create": _cmd_create, "swarm": _cmd_swarm,
     "list": _cmd_list, "ls": _cmd_list, "show": _cmd_show,
     "assign": _cmd_assign, "set-model": _cmd_set_model,

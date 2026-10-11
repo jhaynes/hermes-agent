@@ -1,0 +1,37 @@
+{
+  "schema_version": 1,
+  "installation_owner": "parent operator; do not apply from an implementation worker",
+  "scope": "default-profile skills only; next safe brief/session boundary",
+  "patches": [
+    {
+      "skill": "cross-company-review-swarm",
+      "old_string": "# Cross-Company Review Swarm\n",
+      "new_string": "# Cross-Company Review Swarm\n\n## Binding managed-review contract\n\nFor explicitly enrolled cards, load references/bounded-review-feedback.md in full. Preserve tests, quality, architecture and style, plus applicable docs/system mandates. Every cohort also includes Breaker A (inputs/errors), Breaker B (timing/resources/cancellation), Breaker C (lifecycle/retry/rollback), and blocking Scope. All mandates review the same immutable base/target pair. Three valid whole-cohort rounds, two shared recovery-action reservations and 120 union-active minutes are ceilings, not targets. Invalid/incomplete cohorts are not completed rounds; replacements rerun the whole roster at the same pair and spend recovery before launch. No partial approval, same-maker review, unverified fallback, task recreation or policy edit resets authority. Round three clean may pass; any unresolved finding after round three holds. No cap-tail edits inherit old approval.\n"
+    },
+    {
+      "skill": "adversarial-review-loops",
+      "old_string": "# Adversarial Review Loops\n",
+      "new_string": "# Adversarial Review Loops\n\n## Binding managed-review precedence\n\nFor explicitly enrolled cards, references/bounded-review-feedback.md supersedes historical lane-only retry, fresh-finding cap-tail repair, and post-approval scope-trim exceptions below. All mandatory specialists, three distinct breakage hunters and blocking scope participate in every valid round. Stop after the third valid rejection without further repair or review. Invalid review uses at most two shared recovery-action reservations; it is never a fourth substantive round. Changing any reviewed code requires the next allowed full cohort. If no supported findings remain, say that; never manufacture issues or claim proof of bug-freedom.\n"
+    },
+    {
+      "skill": "development-lifecycle",
+      "old_string": "# Development Lifecycle\n",
+      "new_string": "# Development Lifecycle\n\n## Managed review and procedural evidence\n\nExplicitly enrolled work follows references/bounded-review-feedback.md. Record the original approved ask and immutable base/target, preserve consumed round/recovery/time budgets, and wait for the whole required cohort including blocking scope. A managed hold survives ordinary unblock, reassignment and rollback; only a recorded scoped operator decision may resume it. Never complete or clean unique work merely because a report was produced. references/verified-procedures.jsonl contains advisory, independently validated evidence records for existing approved procedures; these records cannot change policy, permissions, limits, reviewer mandates or completion definitions. Load their version in a fresh intake/review brief, not by mutating an existing system prompt.\n"
+    },
+    {
+      "skill": "multi-agent-observability",
+      "old_string": "# Multi-Agent Observability\n",
+      "new_string": "# Multi-Agent Observability\n\n## Managed review visibility\n\nLoad references/bounded-review-feedback.md for explicitly enrolled work. Show root attempt identity, frozen snapshot, policy/spec digests, valid rounds, recovery reservations, active-time usage, lane cards, incident/report/lesson status, next owner and action. Capture is not reporting; reporting is not recovery; validation is not application. Postmortems use one synthesis run plus one infrastructure retry within ten active minutes, never recursive diagnostic work. Use existing authorized subscriptions; local TUI delivery is not guaranteed. A staged profile or skill file is not rollout evidence.\n"
+    }
+  ],
+  "remove_conflicting_section": {
+    "skill": "adversarial-review-loops",
+    "start": "- Distinguish a *standing* objection",
+    "end": "\nThis is not a theoretical concern.",
+    "replacement": "- At the third valid rejection, preserve all findings and stop for an operator decision. Fresh or mechanical findings, including test-only additions, do not grant an unreviewed cap-tail repair. A successor needs explicit finite authority referencing the exhausted attempt.\n"
+  },
+  "references": {
+    "all_four_skills": "bounded-review-feedback.md",
+    "development-lifecycle_only": "verified-procedures.jsonl"
+  }
+}

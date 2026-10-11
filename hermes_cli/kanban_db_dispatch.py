@@ -293,6 +293,8 @@ def reap_worker_zombies() -> "list[int]":
             _live_worker_procs.pop(pid, None)
             reaped.append(pid)
         return reaped
+    from hermes_cli.kanban_worker_launch import reap_children
+    reaped.extend(reap_children(_record_worker_exit))
     try:
         while True:
             try:
@@ -512,11 +514,18 @@ def reap_terminal_workers(conn: sqlite3.Connection, *, signal_fn=None) -> list[s
     alone so a worker still finalising after its own transition is not killed.
     One row's failure (signal, /proc probe) is logged and skips only that row.
     Returns the task ids whose worker was terminated."""
+    from hermes_cli.kanban_review_state import supervision_deadlines
+    supervision_deadlines(conn)
+    now = time.time()
     rows = conn.execute(
-        "SELECT id, task_id, worker_pid, worker_started_at, claim_lock FROM task_runs "
-        "WHERE ended_at IS NOT NULL AND ended_at <= ? "
-        "AND worker_pid IS NOT NULL AND worker_started_at IS NOT NULL",
-        (int(time.time()) - TERMINAL_WORKER_REAP_GRACE_SECONDS,),
+        "SELECT r.id, r.task_id, r.worker_pid, r.worker_started_at, r.claim_lock FROM task_runs r "
+        "LEFT JOIN review_actions a ON a.run_id=r.id "
+        "LEFT JOIN review_attempts w ON w.id=a.attempt_id "
+        "LEFT JOIN workflow_postmortems p ON p.run_id=r.id "
+        "WHERE r.ended_at IS NOT NULL AND (r.ended_at <= ? "
+        "OR a.deadline <= ? OR p.deadline <= ? OR w.state IN ('held','cancelled')) "
+        "AND r.worker_pid IS NOT NULL AND r.worker_started_at IS NOT NULL",
+        (int(now) - TERMINAL_WORKER_REAP_GRACE_SECONDS, now, now),
     ).fetchall()
     host_prefix = _kb._host_prefix()
     reaped: list[str] = []
@@ -656,14 +665,19 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
     timed_out: list[str] = []
     now = int(time.time())
     host_prefix = _kb._host_prefix()
+    from hermes_cli.kanban_review_state import supervision_deadlines
+    managed_deadlines = supervision_deadlines(conn)
 
     rows = conn.execute(
         "SELECT t.id, t.worker_pid, t.worker_started_at, "
         "       COALESCE(r.started_at, t.started_at) AS active_started_at, "
-        "       t.max_runtime_seconds, t.claim_lock "
+        "       t.max_runtime_seconds, t.claim_lock, t.status, t.current_run_id "
         "FROM tasks t "
         "LEFT JOIN task_runs r ON r.id = t.current_run_id "
-        "WHERE t.status = 'running' AND t.max_runtime_seconds IS NOT NULL "
+        "WHERE (t.status = 'running' OR EXISTS(SELECT 1 FROM review_actions a "
+        "WHERE a.task_id=t.id AND a.run_id=t.current_run_id AND a.state='running') "
+        "OR EXISTS(SELECT 1 FROM workflow_postmortems p WHERE p.task_id=t.id AND p.run_id=t.current_run_id)) "
+        "  AND t.max_runtime_seconds IS NOT NULL "
         "  AND COALESCE(r.started_at, t.started_at) IS NOT NULL "
         "  AND t.worker_pid IS NOT NULL"
     ).fetchall()
@@ -675,7 +689,8 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
         # so retries must be measured from the active task_runs row.
         elapsed = now - int(row["active_started_at"])
         limit = int(row["max_runtime_seconds"])
-        if elapsed < limit:
+        deadline = managed_deadlines.get(row['id'])
+        if (time.time() < deadline if deadline is not None else elapsed < limit):
             continue
 
         pid = int(row["worker_pid"])
@@ -707,9 +722,9 @@ def enforce_max_runtime(conn: sqlite3.Connection, *, signal_fn=None) -> list[str
                 "UPDATE tasks SET status = ?, claim_lock = NULL, "
                 "claim_expires = NULL, worker_pid = NULL, worker_started_at = NULL, "
                 "last_heartbeat_at = NULL "
-                "WHERE id = ? AND status = 'running' "
+                "WHERE id = ? AND status = ? AND current_run_id IS ? "
                 "  AND worker_pid = ? AND claim_lock IS ?",
-                (retry_status, tid, pid, row["claim_lock"]),
+                (retry_status, tid, row['status'], row['current_run_id'], pid, row["claim_lock"]),
             )
             if cur.rowcount == 1:
                 payload = {
@@ -1366,6 +1381,9 @@ def _record_task_failure(
     """
     if failure_limit is None:
         failure_limit = DEFAULT_FAILURE_LIMIT
+    from hermes_cli.kanban_review_state import redact_completion
+    _, error, event_payload_extra = redact_completion(conn, task_id, None, error, event_payload_extra)
+    error = error or 'evidence_redaction_unavailable'
     error = error[:500]
     with _kb.write_txn(conn):
         row = conn.execute(
@@ -2143,6 +2161,8 @@ def _run_reclaim_phase(
     board: Optional[str] = None,
 ) -> None:
     """Reclaim stale/orphaned/crashed/timed-out running tasks, then promote."""
+    from hermes_cli.kanban_review_state import supervision_deadlines
+    supervision_deadlines(conn)
     reap_worker_zombies()
     result.reaped_terminal_workers = reap_terminal_workers(conn)
     result.reclaimed = _kb.release_stale_claims(conn, failure_limit=failure_limit)
@@ -2299,10 +2319,19 @@ def _dispatch_once_locked(
     the PID so later ticks catch crashes before the TTL. Cap semantics:
     :func:`_tick_spawn_budget`."""
     result = DispatchResult()
+    if not dry_run:
+        from hermes_cli.kanban_workflow_incidents import reconcile_events, diagnose_unowned_queue
+        reconcile_events(conn)
+        diagnose_unowned_queue(conn, stale_timeout_seconds)
+        from hermes_cli.kanban_postmortem import queue_reports
+        queue_reports(conn)
     _run_reclaim_phase(
         conn, result, stale_timeout_seconds=stale_timeout_seconds,
         failure_limit=failure_limit, reconcile_orphans=reconcile_orphans, board=board,
     )
+    if not dry_run:
+        from hermes_cli.kanban_review_output import publish_summaries
+        publish_summaries(conn)
     may_spawn, spawn_budget = _tick_spawn_budget(
         conn, result, max_spawn=max_spawn, max_in_progress=max_in_progress, board=board,
     )
@@ -2897,6 +2926,8 @@ def _default_spawn(task: Task, workspace: str, *, board: Optional[str] = None) -
         )
     # Intentionally NOT closing log_f: the child keeps writing after return;
     # the OS-level FD stays open in the child until it exits.
+    from hermes_cli.kanban_worker_launch import retain_child
+    retain_child(proc)
     if _kb._IS_WINDOWS:
         _live_worker_procs[proc.pid] = proc
     return proc.pid

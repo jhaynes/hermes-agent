@@ -1284,7 +1284,9 @@ def create_task(
     """
     from hermes_cli.kanban_db_graph import initial_task_state, inherit_creator_origin
     from hermes_cli.kanban_pr_acceptance import validate_contract
+    from hermes_cli.kanban_review_guards import reject_nested_creation
 
+    reject_nested_creation(conn, creator_task_id)
     completion_contract = validate_contract(completion_contract)
     model_override, provider_override = _validate_model_override(model_override, provider_override)
     reasoning_effort = normalize_reasoning_effort(reasoning_effort)
@@ -1882,7 +1884,7 @@ def add_attachment(
     if not stored_path or not stored_path.strip():
         raise ValueError("attachment stored_path is required")
     now = int(time.time())
-    with write_txn(conn):
+    with write_txn(conn, allow_nested=True):
         _require_task(conn, task_id)
         cur = conn.execute(
             "INSERT INTO task_attachments "
@@ -1946,10 +1948,15 @@ def _append_event(
     run_id: Optional[int] = None,
 ) -> None:
     """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
-    conn.execute(
+    from hermes_cli.kanban_review_state import redact_event
+    payload = redact_event(conn, task_id, payload)
+    now = int(time.time())
+    cursor = conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
+        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), now),
     )
+    from hermes_cli.kanban_workflow_incidents import capture_event
+    capture_event(conn, cursor.lastrowid, task_id, run_id, kind, payload, now)
 
 
 def _end_run(
@@ -1967,6 +1974,8 @@ def _end_run(
     run_id = _current_run_id(conn, task_id)
     if run_id is None:
         return None
+    from hermes_cli.kanban_review_state import redact_completion
+    summary, error, metadata = redact_completion(conn, task_id, summary, error, metadata)
     conn.execute(
         """
         UPDATE task_runs
@@ -1983,6 +1992,8 @@ def _end_run(
         (status or outcome, outcome, summary, error, _json_or_null(metadata), now, run_id),
     )
     conn.execute("UPDATE tasks SET current_run_id = NULL WHERE id = ?", (task_id,))
+    from hermes_cli.kanban_review_state import released
+    released(conn, task_id, run_id, outcome, metadata)
     return run_id
 
 
@@ -2154,6 +2165,9 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
         for row in todo_rows:
             task_id = row["id"]
             cur_status = row["status"]
+            from hermes_cli.kanban_postmortem import is_diagnostic, claim_allowed as diagnostic_claim_allowed
+            if is_diagnostic(conn, task_id) and not diagnostic_claim_allowed(conn, task_id):
+                continue
             if cur_status == "blocked" and _has_sticky_block(conn, task_id):
                 # Explicit human-intervention block; only ``unblock_task`` may exit it.
                 continue
@@ -2225,6 +2239,9 @@ def _claim_and_open_run(
 ) -> Optional[int]:
     """CAS ``source_status -> running``, open a run row, emit ``claimed``; None
     when the CAS lost. Caller holds the txn."""
+    from hermes_cli.kanban_review_state import claim_allowed
+    if not claim_allowed(conn, task_id):
+        return None
     cur = conn.execute(
         f"""
         UPDATE tasks
@@ -2259,6 +2276,8 @@ def _claim_and_open_run(
     )
     run_id = run_cur.lastrowid
     conn.execute("UPDATE tasks SET current_run_id = ? WHERE id = ?", (run_id, task_id))
+    from hermes_cli.kanban_review_state import claimed
+    claimed(conn, task_id, run_id)
     _append_event(
         conn, task_id, "claimed",
         {"lock": lock, "expires": expires, "run_id": run_id, **(event_extra or {})}, run_id=run_id,
@@ -2754,6 +2773,8 @@ def complete_task(
     if not _parents_satisfied(conn, task_id):
         return False
     from hermes_cli.kanban_pr_acceptance_store import prepare_acceptance, record_acceptance
+    from hermes_cli.kanban_review_state import redact_completion
+    summary, result, metadata = redact_completion(conn, task_id, summary, result, metadata)
     verified_cards = _gate_created_cards(conn, task_id, created_cards, summary or result)
     _gate_empty_completion(conn, task_id, result=result, summary=summary)
     metadata = _merge_completion_prose_artifacts(
@@ -2766,6 +2787,9 @@ def complete_task(
     with write_txn(conn):
         # Hard invariant even for human review approval: a parent may have
         # reopened while this task waited.
+        from hermes_cli.kanban_review_state import completion_allowed
+        if not completion_allowed(conn, task_id, expected_run_id, metadata):
+            return False
         if not _parents_satisfied(conn, task_id):
             return False
         if acceptance is not None and not record_acceptance(conn, task_id, acceptance):
@@ -3341,7 +3365,7 @@ def redact_review_value(value: Any) -> Any:
 
         return redact_sensitive_text(value, force=True)
     if isinstance(value, dict):
-        return {key: redact_review_value(item) for key, item in value.items()}
+        return {redact_review_value(key): redact_review_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [redact_review_value(item) for item in value]
     if isinstance(value, tuple):
@@ -3387,6 +3411,10 @@ def request_review(
     staged_copies: list[Path] = []
     try:
         with write_txn(conn):
+            from hermes_cli.kanban_review_state import handoff_allowed, redact_completion
+            summary, _, metadata = redact_completion(conn, task_id, summary, None, metadata)
+            if not handoff_allowed(conn, task_id, expected_run_id, metadata):
+                return _ret(False, 'managed review requires a current preflight/repair receipt')
             if not _parents_satisfied(conn, task_id):
                 return _ret(False, "parent dependencies are not satisfied")
             trow = conn.execute(
@@ -3991,6 +4019,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     attachments, prior attempts, done-parent handoffs, the assignee's recent
     work, comments. Lists are tail-capped and fields char-capped
     (``_CTX_MAX_*``) so the prompt stays bounded on pathological boards."""
+    from hermes_cli.kanban_diagnostic_worker import context as diagnostic_context
+    diagnostic = diagnostic_context(conn, task_id)
+    if diagnostic is not None:
+        return json.dumps(diagnostic, sort_keys=True)
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
@@ -4003,6 +4035,10 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     _ctx_parent_results(lines, conn, task_id, now)
     _ctx_role_history(lines, conn, task, now)
     _ctx_comments(lines, list_comments(conn, task_id), now)
+    from hermes_cli.kanban_review_output import brief
+    managed_brief = brief(conn, task_id)
+    if managed_brief:
+        lines.append(managed_brief)
     return "\n".join(lines).rstrip() + "\n"
 
 
