@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jhaynes.github.io/hermes-agent/contracts/seam-contract-v2.schema.json",
+  "title": "Candidate review-accounting seam contract v2",
+  "description": "Machine-readable seam contract frozen by U0 (plan v3, sha256 1f7cd6d13c65457581d84e8f30810549f177cdea9c2a9c18462b668183ec5e7e). Describes the five capabilities that the candidate runtime MUST provide natively (callers, preconditions, atomic persistence, generation/watermark, idempotency, typed failures, readback) plus the 25-probe behavioral surface re-derived from the Phase A receipt at e2427daf. Amendment rule: any change is recorded as a decision with the contract version bumped and the digest recomputed; U6 judges against a specific contract SHA.",
+  "type": "object",
+  "required": ["contract", "candidate_pin", "capabilities", "probes", "traceability"],
+  "properties": {
+    "contract": {
+      "type": "object",
+      "required": ["name", "version", "status", "frozen_by", "frozen_at_plan_sha256", "supersedes"],
+      "properties": {
+        "name": { "const": "seam-contract" },
+        "version": { "const": 2 },
+        "status": { "const": "frozen" },
+        "frozen_by": { "const": "U0 (task t_9b97698a)" },
+        "frozen_at_plan_sha256": { "const": "1f7cd6d13c65457581d84e8f30810549f177cdea9c2a9c18462b668183ec5e7e" },
+        "supersedes": { "const": "seam-contract/1 (implicit, never frozen as a document)" },
+        "amendment_rule": {
+          "type": "string",
+          "description": "Amendments are recorded as decisions with the contract version bumped and the digest recomputed. U6 judges against a specific contract SHA."
+        }
+      }
+    },
+    "candidate_pin": {
+      "type": "object",
+      "required": ["base_commit", "base_branch", "repo", "phase_a_receipt_sha256", "phase_a_verdict"],
+      "properties": {
+        "base_commit": { "const": "e2427daf3d7f5ef90b0dc196d89fee4a2debb0d4" },
+        "base_branch": { "const": "backup/bounded-review-feedback" },
+        "repo": { "const": "jhaynes/hermes-agent" },
+        "phase_a_receipt_sha256": { "const": "78287727b9281e5d8a7ce4bb8c19da6ffc8753c8c8d455a589cff73cf199b200" },
+        "phase_a_verdict": { "const": "candidate_seam_contract_failed" },
+        "contract_gaps_at_phase_a": {
+          "type": "array",
+          "minItems": 5,
+          "maxItems": 5,
+          "description": "The five structural gaps the Phase A receipt recorded. All five are addressed by capabilities C1-C5."
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 5,
+      "maxItems": 5,
+      "items": { "$ref": "#/definitions/capability" }
+    },
+    "probes": {
+      "description": "Frozen probe suite: the 25 re-derived behavioral probes plus the new per-capability probes U1-U5. Each probe has an ID, the capability it exercises, its expected typed result, and its proof domain. The suite is pinned by digest and approved under the maker-independence rule.",
+      "type": "array",
+      "items": { "$ref": "#/definitions/probe" }
+    },
+    "traceability": {
+      "description": "plan-v2 line -> contract clause -> probe IDs -> unit. Machine-checkable: U6 diffs contract vs receipt mechanically.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["plan_ref", "clause", "probes", "unit"],
+        "properties": {
+          "plan_ref": { "type": "string", "description": "Governing plan v2 line reference, e.g. 'plan v2:147'." },
+          "clause": { "type": "string", "description": "Contract clause ID (capability ID or named clause)." },
+          "probes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+          "unit": { "type": "string", "description": "Unit that implements (U0-U6), or 'existing' for the baseline surface." }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "capability": {
+      "type": "object",
+      "required": ["id", "title", "plan_v2_basis", "caller", "preconditions", "atomic_persistence", "generation_watermark", "idempotency", "typed_failures", "readback", "probes", "implementation_unit"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^C[1-5]$" },
+        "title": { "type": "string" },
+        "plan_v2_basis": { "type": "string" },
+        "caller": {
+          "type": "object",
+          "required": ["who", "module_surface"],
+          "properties": {
+            "who": { "type": "string", "description": "The only authorized caller of this capability." },
+            "module_surface": { "type": "string", "description": "Candidate module(s) expected to own it." }
+          }
+        },
+        "preconditions": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "atomic_persistence": { "type": "string", "description": "What must persist in ONE transaction, and the isolation mechanism." },
+        "generation_watermark": { "type": ["string", "null"], "description": "Generation/watermark/fence semantics, or null if not applicable." },
+        "idempotency": { "type": "string", "description": "Replay behavior. Replay never revives expired/refunded state." },
+        "typed_failures": { "type": "array", "items": { "type": "string" }, "minItems": 1, "description": "Typed refusal codes; fail closed, no silent fallback." },
+        "readback": { "type": "string", "description": "Supported read-only readback path; reads never create/extend/alter authority." },
+        "probes": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "implementation_unit": { "type": "string", "description": "U1-U5 unit that implements, per plan v3 sequencing U0->U4->U1->(U2+U5)->U3->U6." }
+      }
+    },
+    "probe": {
+      "type": "object",
+      "required": ["id", "capability", "kind", "expected_result", "domain"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^(P[0-9]+-[a-z0-9-]+|U[0-5]-[a-z0-9-]+|BASE-[a-z0-9-]+)$" },
+        "capability": { "type": "string" },
+        "kind": { "type": "string", "description": "behavioral | capability | adversarial | boundary | concurrency | environmental" },
+        "expected_result": { "type": "string", "description": "Typed expected result; PASS means observed exactly this, no fallback." },
+        "domain": { "type": "string", "description": "Where it runs: isolated temp HERMES_HOME+board on tower, Linux-only, etc." },
+        "phase_a_evidence": { "type": "string", "description": "For re-derived probes: the Phase A receipt probe ID this re-derives, and any baseline change declaration." }
+      }
+    }
+  }
+}
