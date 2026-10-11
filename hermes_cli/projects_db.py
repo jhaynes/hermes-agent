@@ -479,7 +479,17 @@ def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: b
 
 def branch_name_for(project: Project, task_id: str, *, title: str = "") -> str:
     """Deterministic ``<project-slug>/<task-id>[-<title-slug>]`` branch name for a project-linked kanban
-    task (stable and human-meaningful, replacing the random ``wt/<task-id>`` fallback)."""
+    task (stable and human-meaningful, replacing the random ``wt/<task-id>`` fallback).
+
+    The title slug stays ``git check-ref-format --branch`` clean: dot runs (``..``),
+    leading/trailing ``.``/``-``/``_``, and ``.lock`` endings are all refused by git, so they are
+    normalized away after the length cut (which itself can re-expose a trailing ``.``).
+    """
     base = f"{project.slug or _slugify(project.name)}/{task_id}"
-    tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-")[:40].strip("-") if title else ""
+    if not title:
+        return base
+    tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-")[:40]
+    tslug = re.sub(r"\.+", "-", tslug).strip(".-_")
+    if tslug.endswith(".lock"):
+        tslug = tslug[:-5].rstrip(".-_")
     return f"{base}-{tslug}" if tslug else base

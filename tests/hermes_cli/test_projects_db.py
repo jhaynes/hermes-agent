@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 
 import pytest
 
@@ -142,5 +143,41 @@ def test_per_profile_isolation(tmp_path):
     finally:
         a.close()
         b.close()
+
+
+def _assert_valid_git_branch(name: str) -> None:
+    """The branch name must survive ``git check-ref-format --branch``."""
+    subprocess.run(
+        ["git", "check-ref-format", "--branch", name],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
+@pytest.fixture
+def project():
+    return pdb.Project(id="p1", slug="smithers", name="smithers", created_at=0)
+
+
+@pytest.mark.parametrize(
+    ("title", "forbidden"),
+    [
+        pytest.param("delta stamp ... 758b3758..bfef29ee", "..", id="inner-dot-run"),
+        pytest.param("delta stamp architecture lane 758b3758..", "..", id="trailing-dots"),
+        pytest.param("release.lock preparation", ".lock", id="lock-suffix"),
+        pytest.param("... ...", None, id="all-dots"),
+    ],
+)
+def test_branch_name_for_rejects_git_illegal_dots(project, title, forbidden):
+    branch = pdb.branch_name_for(project, "t_54a8f435", title=title)
+
+    assert branch
+    if forbidden is None:
+        # A title that sanitizes to nothing contributes no slug: fall back to the base branch.
+        assert branch == f"{project.slug}/t_54a8f435"
+    else:
+        assert forbidden not in branch.rsplit("/", 1)[1]
+    _assert_valid_git_branch(branch)
 
 
