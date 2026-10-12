@@ -14,6 +14,57 @@ from hermes_cli.kanban_db_connect import write_txn
 REQUIRED_LANES = frozenset({'tests', 'quality', 'architecture', 'style',
                             'breaker_a', 'breaker_b', 'breaker_c', 'scope'})
 
+DEFAULT_TERMINATION_RESERVE_SECONDS = 60
+
+
+def effective_reserve():
+    """Effective termination reserve from the single kanban.review_feedback source.
+
+    Stage (a) validation at config load: finite positive integer, and smaller than
+    every issuable lease/cap duration. Violations are the typed
+    invalid_reserve_config refusal; absent config defaults to 60.
+    """
+    from hermes_cli.config import load_config
+    section = load_config().get('kanban', {}).get('review_feedback', {})
+    value = section.get('termination_reserve_seconds', DEFAULT_TERMINATION_RESERVE_SECONDS)
+    if type(value) is not int or not math.isfinite(value) or value <= 0:
+        raise ValueError('invalid_reserve_config')
+    for budget in ('active_seconds',):
+        lease = section.get(budget)
+        if lease is not None:
+            if type(lease) is not int or not math.isfinite(lease) or lease <= 0:
+                raise ValueError('invalid_reserve_config')
+            if value >= lease:
+                raise ValueError('invalid_reserve_config')
+    return value
+
+
+def _configured_budgets():
+    from hermes_cli.config import load_config
+    return load_config().get('kanban', {}).get('review_feedback', {})
+
+
+def launcher_command_timeout(lease_remaining, *, union_remaining=None, requested_timeout=None):
+    """Largest command timeout the gated launcher may start with.
+
+    Subtracts the effective reserve from both enforcement boundaries (plan v2:147):
+    the action-lease boundary and, when tighter, the union-cap boundary. The
+    launcher never starts a command whose timeout plus reserve reaches either
+    boundary; a window without a safe margin is the typed reserve_exceeds_boundary
+    refusal.
+    """
+    reserve = effective_reserve()
+    boundaries = [lease_remaining]
+    if union_remaining is not None:
+        boundaries.append(union_remaining)
+    tightest = min(b for b in boundaries if b is not None)
+    allowed = math.floor(tightest - reserve)
+    if requested_timeout is not None and math.ceil(requested_timeout + reserve) > tightest:
+        raise ValueError('reserve_exceeds_boundary')
+    if requested_timeout is not None:
+        return math.floor(min(requested_timeout, allowed))
+    return allowed if allowed > 0 else None
+
 
 def initialize(conn):
     with write_txn(conn, allow_nested=True):
@@ -29,7 +80,11 @@ def initialize(conn):
             id TEXT PRIMARY KEY, attempt_id TEXT NOT NULL, task_id TEXT NOT NULL,
             ordinal INTEGER NOT NULL, category TEXT NOT NULL, recovery INTEGER NOT NULL,
             state TEXT NOT NULL, run_id INTEGER UNIQUE, deadline REAL,
+            termination_reserve_seconds INTEGER,
             UNIQUE(attempt_id,ordinal,category,recovery))''')
+        reserve_columns = {row[1] for row in conn.execute('PRAGMA table_info(review_actions)')}
+        if 'termination_reserve_seconds' not in reserve_columns:
+            conn.execute('ALTER TABLE review_actions ADD COLUMN termination_reserve_seconds INTEGER')
         conn.execute('''CREATE TABLE IF NOT EXISTS review_clock (
             attempt_id TEXT PRIMARY KEY, boot_id TEXT NOT NULL,
             monotonic_at REAL NOT NULL, wall_at REAL NOT NULL)''')
@@ -166,7 +221,22 @@ def claimed(conn, task_id, run_id):
     row = conn.execute('SELECT max_runtime_seconds FROM tasks WHERE id=?', (task_id,)).fetchone()
     remaining = max(1, math.floor(attempt['policy']['active_seconds'] - attempt['active_seconds']))
     cap = min(remaining, row[0]) if row[0] and row[0] > 0 else remaining
-    conn.execute("UPDATE review_actions SET state='running',run_id=?,deadline=? WHERE task_id=? AND state='reserved'", (run_id,time.time()+cap,task_id))
+    # Stage (b) validation at lease issuance: remaining > reserve, else the typed
+    # insufficient_safe_window refusal parks the lineage (no lease is issued).
+    reserve = effective_reserve()
+    if remaining <= reserve:
+        hold(conn, attempt, 'insufficient_safe_window')
+        # A hold inside the claim transaction revokes admission retroactively:
+        # the task must not stay 'running' with an open run and no valid lease.
+        conn.execute("UPDATE tasks SET status='blocked',block_kind='needs_input' WHERE id=?", (task_id,))
+        if run_id is not None:
+            conn.execute("UPDATE task_runs SET status='failed' WHERE id=?", (run_id,))
+            conn.execute('UPDATE tasks SET current_run_id=NULL WHERE id=?', (task_id,))
+        return
+    # The effective reserve is recorded per action in the same transaction that
+    # issues the lease; config changes apply only to actions reserved afterwards.
+    conn.execute("UPDATE review_actions SET state='running',run_id=?,deadline=?,termination_reserve_seconds=? WHERE task_id=? AND state='reserved'",
+                 (run_id, time.time() + cap, reserve, task_id))
     conn.execute('UPDATE tasks SET max_runtime_seconds=? WHERE id=?', (cap,task_id))
     conn.execute('UPDATE task_runs SET max_runtime_seconds=? WHERE id=?', (cap,run_id))
 
@@ -296,6 +366,9 @@ def enroll_review(conn, task_id, *, expected_status, expected_run_id, board_id,
         if type(value) is not int or value < (0 if key == 'recovery' else 1):
             raise ValueError(f'kanban.review_feedback.{key} requires a finite integer budget')
         effective[key] = value
+    # Stage (a) cross-field check at enrollment, where the policy is pinned: the
+    # reserve must be smaller than every issuable lease/cap duration (plan v2:472).
+    effective['termination_reserve_seconds'] = effective_reserve()
     policy = json.dumps(effective, sort_keys=True, separators=(',', ':'))
     with write_txn(conn, allow_nested=True):
         from hermes_cli.kanban_db import _append_event

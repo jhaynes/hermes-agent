@@ -64,7 +64,9 @@ def test_enrollment_snapshots_effective_config_and_disable_preserves_gates(tmp_p
     from hermes_cli import kanban_review_state as state
 
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
-    save_config({'kanban': {'review_feedback': {'rounds': 2, 'recovery': 1, 'active_seconds': 60}}})
+    save_config({'kanban': {'review_feedback': {'rounds': 2, 'recovery': 1,
+                                                'active_seconds': 60,
+                                                'termination_reserve_seconds': 30}}})
     conn = connect(tmp_path / 'board.db')
     def enroll(task):
         return state.enroll_review(conn, task, expected_status='ready', expected_run_id=None, expected_assignee='builder',

@@ -93,7 +93,21 @@ def test_shared_native_send_rechecks_admission(tmp_path, monkeypatch, mode, chan
         _buffer_diagnostic_status=lambda *a:None,
         _build_api_kwargs=lambda messages:{'model':'gpt-5', 'messages':messages} if mode == 'chat_summary' else {'model':'gpt-5','input':messages},
         _get_transport=lambda:SimpleNamespace(normalize_response=lambda response, **kw:SimpleNamespace(content='ok', tool_calls=[])))
-    agent._run_codex_stream = lambda kwargs:run_codex_stream(agent, kwargs)
+    agent._run_codex_stream = lambda kwargs, client=None, on_first_delta=None: run_codex_stream(agent, kwargs)
+    # fe14267769 routes _codex_summary_attempt through interruptible_api_call; the
+    # helper lives on the real agent via run_agent's _forward shim, so pin it here.
+    from agent.chat_completion_helpers import interruptible_api_call
+    agent._interruptible_api_call = lambda kwargs: interruptible_api_call(agent, kwargs)
+    # run_agent.py:592 arms the non-stream stale watchdog from the resolved base;
+    # the stub agent has no config, so pin the run-budget-free default resolver.
+    agent._compute_non_stream_stale_timeout = lambda api_payload: float('inf')
+    # _NonStreamRequest takes a per-request client through ClientLifecycleMixin's
+    # slot machinery; the stub pins the shared guarded client instead so every
+    # physical send still crosses the live admission guard under test.
+    agent._create_request_openai_client = lambda **kw: agent._ensure_primary_openai_client()
+    agent._create_request_anthropic_client = lambda **kw: agent._anthropic_client
+    agent._close_request_openai_client = lambda client, **kw: None
+    agent._close_request_anthropic_client = lambda client, **kw: None
     if mode == 'anthropic_summary':
         agent.api_mode = 'anthropic_messages'
         agent._anthropic_client = client

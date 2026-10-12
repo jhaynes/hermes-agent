@@ -14,7 +14,7 @@ def workflow_details(conn, task_id):
     actions=[]
     if attempt:
         lanes=[dict(r) for r in conn.execute('SELECT task_id,round_id,mandate,state,run_id,maker FROM review_members WHERE attempt_id=? ORDER BY rowid DESC LIMIT 50',(attempt['id'],))]
-        actions=[dict(r) for r in conn.execute('SELECT id,ordinal,category,recovery,state,run_id,deadline FROM review_actions WHERE attempt_id=? ORDER BY rowid DESC LIMIT 64',(attempt['id'],))]
+        actions=[dict(r) for r in conn.execute('SELECT id,ordinal,category,recovery,state,run_id,deadline,termination_reserve_seconds FROM review_actions WHERE attempt_id=? ORDER BY rowid DESC LIMIT 64',(attempt['id'],))]
         attempt['decisions'] = [json.loads(r[0]) for r in conn.execute(
             'SELECT receipt FROM review_decisions WHERE attempt_id=? ORDER BY version', (attempt['id'],))]
         attempt['lineage'] = [dict(r) for r in conn.execute(

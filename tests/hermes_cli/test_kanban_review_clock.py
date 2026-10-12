@@ -12,6 +12,12 @@ from hermes_cli.kanban_db_connect import connect
 
 def reviewing(tmp_path, monkeypatch, active=7190):
     monkeypatch.delenv('HERMES_KANBAN_TASK', raising=False)
+    # U1: shrink the termination reserve below this fixture's 10-second remaining
+    # window so the lease can issue; the exhaustion probes then advance the clock.
+    from hermes_cli.config import save_config
+    save_config({'kanban': {'review_feedback': {
+        'rounds': 3, 'recovery': 1, 'active_seconds': 7200,
+        'termination_reserve_seconds': 5}}})
     conn = connect(tmp_path / 'board.db')
     owner = kb.create_task(conn, title='clock contract', assignee='builder',
                            workspace_kind='dir', workspace_path=str(tmp_path))

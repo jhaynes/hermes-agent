@@ -1883,6 +1883,12 @@ DEFAULT_CONFIG = {
             # Intake is explicit operator enrollment, never automatic adoption.
             "intake_enabled": True,
             "rounds": 3, "recovery": 2, "active_seconds": 7200,
+            # Seconds the supervisor keeps in reserve at every enforcement boundary:
+            # graceful termination starts at (boundary - reserve), SIGKILL escalation
+            # happens inside the reserve, and no command starts whose timeout plus
+            # this reserve reaches the action-lease or union-cap boundary. Must be a
+            # finite positive integer smaller than every issuable lease duration.
+            "termination_reserve_seconds": 60,
             "postmortem_profile": None, "validator_profile": None,
             "auto_apply_lessons": False, "protected_skill_hash": None,
         },

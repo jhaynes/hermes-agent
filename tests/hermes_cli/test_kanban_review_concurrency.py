@@ -57,7 +57,13 @@ def test_recovery_and_claim_are_atomic_across_processes(tmp_path, monkeypatch):
             gate = tmp_path / (mode + '.go')
             outputs = [tmp_path / f'{mode}-{i}.json' for i in range(2)]
             for output in outputs:
-                processes.append(subprocess.Popen([sys.executable,str(worker),str(root),str(path),task,mode,str(version),str(gate),str(output)],env=dict(os.environ)))
+                # The contention worker imports hermes_cli from the checkout root;
+                # inherit PYTHONPATH explicitly so the spawned interpreter finds it
+                # regardless of how the parent session was launched (Phase A receipt:
+                # this test's scaffolding, not a seam defect).
+                env = dict(os.environ)
+                env['PYTHONPATH'] = str(root) + os.pathsep + env.get('PYTHONPATH', '')
+                processes.append(subprocess.Popen([sys.executable,str(worker),str(root),str(path),task,mode,str(version),str(gate),str(output)],env=env))
             until = time.monotonic() + 10
             while not all(Path(str(p)+'.ready').exists() for p in outputs) and time.monotonic() < until:
                 time.sleep(0.02)
