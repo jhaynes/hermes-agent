@@ -2973,6 +2973,35 @@ def _completed_event_payload(
     return payload
 
 
+_BOARD_QUALIFIED_RE = re.compile(r"\b([a-z0-9][a-z0-9_-]*)/(t_[a-f0-9]{8,})\b")
+
+
+def _resolves_on_named_board(text: str, task_id: str) -> bool:
+    """True when ``text`` names ``<board>/<task_id>`` and that board's DB has the task.
+
+    A forwarder completes with ``forwarded to <board>/<tid>``; the id is real, just on another
+    board, so the current-board scan cannot see it. Only the explicitly named board is read,
+    read-only. Any unreadable board fails closed: the reference stays a phantom.
+    """
+    boards = {b for b, t in _BOARD_QUALIFIED_RE.findall(text) if t == task_id}
+    for board in boards:
+        try:
+            path = kanban_db_path(board)
+            if not path.is_file():
+                continue
+            conn = sqlite3.connect(path, timeout=5)
+            try:
+                conn.execute("PRAGMA query_only = ON")
+                row = conn.execute("SELECT 1 FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            continue
+        if row:
+            return True
+    return False
+
+
 def _flag_phantom_prose_refs(
     conn: sqlite3.Connection, task_id: str, run_id: Optional[int],
     summary: Optional[str], result: Optional[str], verified_cards: list[str],
@@ -2983,7 +3012,10 @@ def _flag_phantom_prose_refs(
     scan_text = " ".join(filter(None, [summary, result]))
     if not scan_text:
         return
-    phantom_refs = [p for p in _scan_prose_for_phantom_ids(conn, scan_text) if p not in set(verified_cards)]
+    phantom_refs = [
+        p for p in _scan_prose_for_phantom_ids(conn, scan_text)
+        if p not in set(verified_cards) and not _resolves_on_named_board(scan_text, p)
+    ]
     if phantom_refs:
         with write_txn(conn):
             _append_event(
