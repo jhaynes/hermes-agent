@@ -432,11 +432,47 @@ def _construct_agent(frame, factory, policy, **kwargs):
     still books the one-shot exit mapping (quota wall 75, re-login 78) before the crash."""
     try:
         from gateway.session_worker_construct import worker_route
-        return factory(**{**kwargs, **worker_route(policy, kwargs)})
+        agent = factory(**{**kwargs, **worker_route(policy, kwargs)})
+        _wire_kanban_routing_receipt(agent, frame)
+        return agent
     except Exception as exc:
         from gateway.session_kanban import record_start_failure
         record_start_failure(frame, exc)
         raise
+
+
+def _wire_kanban_routing_receipt(agent, frame):
+    """A receipted kanban frame (the owner's fence folded ``routing_receipt_id`` into the
+    context) is gated before request 1: the receipt must bind THIS dispatch context, the
+    actually-constructed route is validated against it, and the per-request guard's
+    attributes are wired so every later request re-checks too. No provider request happens
+    between construction and this gate. No-op without a receipt (unrouted/shadow frames)."""
+    context = json.loads(frame['policy'].get('kanban_json') or 'null')
+    receipt_id = (context or {}).get('routing_receipt_id')
+    if not receipt_id:
+        return
+    from hermes_constants import get_hermes_home
+    from agent.model_selection_store import get_receipt
+    from agent.model_selection_types import RoutingBlocked
+    home = str(get_hermes_home())
+    # Worker-side attempt binding: the receipt must name THIS task and run — a valid
+    # receipt another dispatch carried in its context authorizes nothing here.
+    requirements = ((get_receipt(home, receipt_id) or {}).get('requirements') or {})
+    if (requirements.get('execution_kind') != 'kanban'
+            or requirements.get('execution_id') != context.get('task_id')
+            or requirements.get('attempt_id') != str(context.get('run_id'))):
+        raise RoutingBlocked('stale_attempt',
+            f'routing receipt {receipt_id!r} does not bind this dispatch '
+            f'(task {context.get("task_id")!r} run {context.get("run_id")!r})')
+    agent._managed_routing_receipt_id = receipt_id
+    agent._managed_routing_home = home
+    # The gate reads the same derivation the per-request guard re-runs before every
+    # later request: the values the client actually sends with.
+    from agent.managed_route_guard import enforce_managed_route_per_request
+    reason = enforce_managed_route_per_request(agent, record_outcome=True,
+                                               outcome_kind='routing_started')
+    if reason is not None:
+        raise RoutingBlocked(reason, f'the constructed route diverges from receipt {receipt_id!r}')
 
 
 def hello():

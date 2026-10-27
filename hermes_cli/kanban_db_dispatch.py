@@ -2245,12 +2245,31 @@ def _dispatch_lane_task(
             raise
         # This IS the origin authority: the profile whose policy/model_routing.db
         # actually governs this dispatch tick, independent of which profile the
-        # claimed task is assigned to run under. A dispatcher dispatching to a
-        # different assignee's profile (origin A -> worker B) must have B's
-        # worker validate against A's receipt store, never B's own default —
-        # threaded through explicitly below rather than re-derived by the
-        # worker from its own (possibly different) HERMES_HOME.
+        # claimed task is assigned to run under. The receipt is minted into this
+        # origin's store; the assignee profile's owner (same home — the same-home
+        # refusal below releases the claim otherwise) reads its own home's store.
         origin_hermes_home = str(_get_hermes_home())
+        # Same-home carrier (ruling 1): the owner reads only its own home's receipt
+        # store, so a cross-home routed dispatch would authorize nothing — refuse it
+        # here, before minting, through the normal spawn-failure path (a persistently
+        # cross-home task trips the breaker instead of spinning). Shadow dispatch is
+        # exempt: its receipt is observation only and authorizes nothing. An assignee
+        # with no profile dir is NOT cross-home: the spawn env runs that worker in the
+        # origin home (resolve_profile_env FileNotFoundError rule), so the store the
+        # fence reads IS the store the worker's HERMES_HOME names.
+        from hermes_cli.profiles import resolve_profile_env as _resolve_profile_env
+        try:
+            assignee_home = Path(_resolve_profile_env(claimed.assignee)).resolve() if claimed.assignee else None
+        except FileNotFoundError:
+            assignee_home = None
+        if assignee_home is not None and assignee_home != Path(origin_hermes_home).resolve():
+            if _record_task_failure(
+                conn, claimed.id, "routing: cross-home dispatch refused (same-home carrier)",
+                outcome="spawn_failed", failure_limit=failure_limit, release_claim=True, end_run=True,
+                expected_run_id=claimed.current_run_id,
+            ):
+                result.auto_blocked.append(claimed.id)
+            return False
         from agent.model_selection_store import managed_recovery_hold as _managed_recovery_hold
 
         completed_row = conn.execute(
@@ -2272,15 +2291,13 @@ def _dispatch_lane_task(
             return False
         # Receipt minting only: resolve_task_route persists the decision as an
         # audit row (claim/run CAS via set_routing_receipt) and raises
-        # RoutingBlocked on policy failure. The resolved provider/model/
-        # reasoning are mirrored onto the claimed attempt object below; they
-        # are NOT propagated to the worker process — kanban workers submit
-        # only {board, task_id, run_id, claim_lock} to the gateway, which
-        # re-derives the session from the task row. Worker-side routing
-        # enforcement is pending a redesign around the gateway kanban.run
-        # contract.
+        # RoutingBlocked on policy failure. Nothing from the resolved route is
+        # carried on the claimed attempt object — kanban workers submit only
+        # {board, task_id, run_id, claim_lock} to the gateway, whose owner derives
+        # the session's route from the linked receipt (the kanban.run routing
+        # fence) and the worker's pre-request-1 gate enforces it before request 1.
         try:
-            kwargs = _resolve_task_route(
+            _resolve_task_route(
                 origin_hermes_home, conn, claimed,
                 now=int(time.time()),
                 frozen_sha=os.environ.get("HERMES_KANBAN_ROUTING_FROZEN_SHA", "unknown"),
@@ -2294,10 +2311,6 @@ def _dispatch_lane_task(
             ):
                 result.auto_blocked.append(claimed.id)
             return False
-        if kwargs is not None:
-            claimed.provider_override = kwargs["provider"]
-            claimed.model_override = kwargs["model"]
-            claimed.reasoning_effort = kwargs["reasoning_effort"]
     try:
         resolved_branch_name = None
         if claimed.workspace_kind == "worktree":

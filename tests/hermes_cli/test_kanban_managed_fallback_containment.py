@@ -74,6 +74,25 @@ def _fail_current_run(conn, task):
     )
 
 
+def _linked_model(task):
+    """The model of the receipt the dispatcher linked for THIS attempt.
+
+    The carrier carries nothing on the claimed attempt (the override columns stay
+    user-owned): the row's receipt link, read live at spawn time, is the observable
+    that names which route each attempt resolved."""
+    from contextlib import closing
+
+    from agent.model_selection_store import get_receipt
+    from hermes_constants import get_hermes_home
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+
+    with closing(kbc.connect()) as conn:
+        receipt_id = kb.get_task(conn, task.id).routing_receipt_id
+    decision = get_receipt(get_hermes_home(), receipt_id) if receipt_id else None
+    return decision["selected"]["model"] if decision else None
+
+
 def _health_payload(home, receipt_id, *, status, replay_safe):
     import time
     from agent.model_selection_store import get_receipt
@@ -104,7 +123,7 @@ def test_managed_recovery_allows_one_safe_alternate_then_holds(
     spawned = []
 
     def _spawn(task, workspace):
-        spawned.append(task.model_override)
+        spawned.append(_linked_model(task))
         return None
 
     with kbc.connect() as conn:
@@ -168,7 +187,7 @@ def test_managed_recovery_holds_when_prior_contact_is_uncertain(
             routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192},
             max_retries=10,
         )
-        kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(task.model_override))
+        kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(_linked_model(task)))
         first = kb.get_task(conn, tid)
         append_outcome(routing_home, first.routing_receipt_id, "routing_started", {})
         append_outcome(
@@ -180,7 +199,7 @@ def test_managed_recovery_holds_when_prior_contact_is_uncertain(
         )
         _fail_current_run(conn, first)
 
-        result = kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(task.model_override))
+        result = kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(_linked_model(task)))
         task = kb.get_task(conn, tid)
 
     assert spawned == ["gpt-5"]
@@ -213,7 +232,7 @@ def test_operator_reconciliation_allows_one_explicit_replay(
             routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192},
             max_retries=10,
         )
-        kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(task.model_override))
+        kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(_linked_model(task)))
         first = kb.get_task(conn, tid)
         append_outcome(routing_home, first.routing_receipt_id, "routing_started", {})
         append_outcome(
@@ -224,7 +243,7 @@ def test_operator_reconciliation_allows_one_explicit_replay(
             ),
         )
         _fail_current_run(conn, first)
-        kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(task.model_override))
+        kbd.dispatch_once(conn, spawn_fn=lambda task, workspace: spawned.append(_linked_model(task)))
         assert kb.get_task(conn, tid).status == "blocked"
 
         authorize_replay(
@@ -233,7 +252,7 @@ def test_operator_reconciliation_allows_one_explicit_replay(
         )
         assert kb.unblock_task(conn, tid)
         result = kbd.dispatch_once(
-            conn, spawn_fn=lambda task, workspace: spawned.append(task.model_override),
+            conn, spawn_fn=lambda task, workspace: spawned.append(_linked_model(task)),
         )
 
     assert result.spawned
@@ -286,7 +305,7 @@ def test_recovery_retains_whole_attempt_uncertainty(
         with kbc.connect() as conn, OpenAI(api_key="fixture", base_url=endpoint, max_retries=0) as client:
             tid = kb.create_task(conn, title="whole attempt replay", assignee="alice", routing_role="builder",
                                  routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192}, max_retries=10)
-            spawn = lambda task, workspace: spawned.append(task.model_override)
+            spawn = lambda task, workspace: spawned.append(_linked_model(task))
             kbd.dispatch_once(conn, spawn_fn=spawn)
             first = kb.get_task(conn, tid)
             receipt = first.routing_receipt_id
@@ -399,7 +418,7 @@ finally:
         with kbc.connect() as conn:
             tid = kb.create_task(conn, title="actual worker replay", assignee="alice", routing_role="builder",
                                  routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192}, max_retries=10)
-            spawn = lambda task, workspace: spawned.append(task.model_override)
+            spawn = lambda task, workspace: spawned.append(_linked_model(task))
             kbd.dispatch_once(conn, spawn_fn=spawn)
             first = kb.get_task(conn, tid)
             env = {key: value for key, value in os.environ.items() if not key.startswith("HERMES_KANBAN_")}

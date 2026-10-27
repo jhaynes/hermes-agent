@@ -57,10 +57,12 @@ def test_managed_task_resolves_receipted_route_and_spawns_with_it(
     captured = {}
 
     def _fake_spawn(task, workspace):
+        import os
+        # The carrier carries nothing on the claimed attempt: the spawn sees no
+        # stamped overrides; the receipted route is derived by the owner from the
+        # receipt linked on the task row.
         captured["model"] = task.model_override
         captured["provider"] = task.provider_override
-        captured["reasoning"] = task.reasoning_effort
-        import os
         return os.getpid()
 
     with kbc.connect() as conn:
@@ -72,9 +74,9 @@ def test_managed_task_resolves_receipted_route_and_spawns_with_it(
         task = kb.get_task(conn, tid)
 
     assert res.spawned == [(tid, "alice", "")] or res.spawned[0][0] == tid
-    # The worker was actually handed the receipted route, not a default.
-    assert captured["provider"] == "openai"
-    assert captured["model"] == "gpt-5"
+    # The claimed attempt carries no stamped route (ruling 2): the override
+    # columns stay user-owned; the owner derives the route from the receipt.
+    assert captured["model"] is None and captured["provider"] is None
     # A real receipt id was persisted on the task row and resolves to the
     # exact decision that was applied.
     assert task.routing_receipt_id
@@ -95,6 +97,50 @@ def test_managed_task_resolves_receipted_route_and_spawns_with_it(
                        routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192})
         res = kbd.dispatch_once(conn, spawn_fn=_fake_spawn, reconcile_orphans=False)
     assert res.spawned == []
+
+
+def test_cross_home_routed_dispatch_refused(kanban_home, all_assignees_spawnable, monkeypatch):
+    """Ruling 1 (same-home): a dispatcher whose origin home differs from the
+    assignee profile's home refuses a routed dispatch before minting — no
+    receipt, no link, claim released through the normal failure path. Shadow
+    dispatch is exempt (it mints only a shadow receipt and authorizes nothing)."""
+    from hermes_cli import kanban_db as kb
+    from hermes_cli import kanban_db_connect as kbc
+    from hermes_cli import kanban_db_dispatch as kbd
+    from agent.model_selection_store import activate_policy, publish_policy
+    from hermes_constants import get_hermes_home
+
+    record = publish_policy(get_hermes_home(), _policy(), approval_ref="operator:test")
+    activate_policy(get_hermes_home(), "kanban-default", record["revision"])
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env",
+                        lambda name: str(kanban_home / "other-home"))
+    spawned = []
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="cross-home card", assignee="alice", routing_role="builder",
+            routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192},
+        )
+        res = kbd.dispatch_once(conn, dry_run=False,
+                                spawn_fn=lambda task, workspace: spawned.append(task.id))
+        task = kb.get_task(conn, tid)
+
+    assert spawned == [] and res.spawned == []
+    assert task.routing_receipt_id is None  # nothing minted, nothing linked
+    assert "cross-home" in (task.last_failure_error or "")
+    assert task.status in ("ready", "blocked")  # claim released to the failure path
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="cross-home shadow card", assignee="alice", routing_role="builder",
+            routing_mode="shadow",
+            routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192},
+        )
+        res = kbd.dispatch_once(conn, dry_run=False, reconcile_orphans=False,
+                                spawn_fn=lambda task, workspace: spawned.append(task.id))
+        task = kb.get_task(conn, tid)
+
+    assert res.spawned, "shadow dispatch is exempt from the same-home refusal"
 
 
 def test_unmanaged_task_is_never_touched_by_routing(kanban_home, all_assignees_spawnable):

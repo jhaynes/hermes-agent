@@ -3,12 +3,82 @@ import asyncio
 import contextlib
 from contextlib import closing
 from dataclasses import asdict, replace
+import logging
 import threading
 import json
 from pathlib import Path
 import sqlite3
 
 from hermes_state_runtime import RuntimeStoreError
+
+logger = logging.getLogger(__name__)
+
+
+def _routing_blocked(detail):
+    """A routing fence refusal rides the owner's wire refusal: the compound message
+    survives the client's bounded-reason pass (session_controls reads ``wire_message``
+    over ``reason``), and ``detail`` names the check that fired."""
+    exc = RuntimeStoreError('routing_blocked', detail=detail)
+    exc.wire_message = 'routing_blocked_' + detail
+    return exc
+
+
+def _derive_routed_policy(task, run_id, params_policy):
+    """The routing fence + receipt fold (the gateway ``kanban.run`` carrier): a route
+    exists iff a validated receipt, bound to the live run, authorizes it. Fires only for
+    an enforced routed task — a NULL role, NULL mode, ``'shadow'`` or any unknown value
+    folds nothing and checks nothing, so a task that stopped being routed runs unrouted
+    even with a stale receipt id on its row. The receipt wins the live attempt over a
+    user override, and the dropped override is logged (never silent, never blocking).
+    NO ``base_url`` is folded: the endpoint is resolved from the session's frozen config
+    and guarded against the receipt at the provider boundary (the worker's pre-request-1
+    gate and per-request guard). Returns the receipt id, or None for an unrouted session."""
+    if not task.routing_role or task.routing_mode != 'enforced':
+        return None
+    from hermes_constants import get_hermes_home
+    from agent.model_selection_store import get_receipt
+    from agent.model_selection_types import RoutingBlocked
+    home = get_hermes_home()
+    decision = get_receipt(home, task.routing_receipt_id)
+    if decision is None:
+        raise _routing_blocked('receipt_missing')
+    requirements = decision['requirements']
+    if (requirements.get('execution_kind') != 'kanban' or requirements.get('execution_id') != task.id
+            or requirements.get('attempt_id') != str(run_id)):
+        raise _routing_blocked('stale_attempt')
+    # Revocation only at the owner: an emergency revocation blocks admission before any
+    # session exists; a routine policy edit must not affect an already-receipted attempt.
+    from agent.managed_route_runtime import enforce_worker_route
+    selected = decision['selected']
+    try:
+        enforce_worker_route(str(home), task.routing_receipt_id,
+            actual_provider=selected['provider'], actual_model=selected['model'],
+            actual_endpoint=selected.get('endpoint'), actual_reasoning=requirements.get('reasoning'),
+            record_outcome=False)
+    except RoutingBlocked as exc:
+        raise _routing_blocked(exc.reason) from exc
+    _fold_receipt_route(selected['model'], selected['provider'], requirements.get('reasoning'),
+                        task, run_id, params_policy)
+    return task.routing_receipt_id
+
+
+def _fold_receipt_route(model, provider, reasoning, task, run_id, params_policy):
+    """The receipt overwrites what the user-override fold set, field by field; each
+    dropped override is logged with the field, the override value and the receipt id."""
+    for field, receipt_value in (('model', model), ('provider', provider)):
+        override = params_policy.get(field)
+        if override and override != receipt_value:
+            logger.warning('kanban routing: dropped %s override %r for task %s run %s — '
+                           'receipt %s wins the live attempt', field, override, task.id,
+                           run_id, task.routing_receipt_id)
+        params_policy[field] = receipt_value
+    if reasoning:
+        override = params_policy.get('reasoning')
+        if override and override != reasoning:
+            logger.warning('kanban routing: dropped reasoning override %r for task %s run %s — '
+                           'receipt %s wins the live attempt', override, task.id, run_id,
+                           task.routing_receipt_id)
+        params_policy['reasoning'] = reasoning
 
 
 def build_kanban_policy(connection, params, config):
@@ -53,6 +123,7 @@ def build_kanban_policy(connection, params, config):
     for name, value in (('model', task.model_override), ('provider', task.provider_override), ('reasoning', task.reasoning_effort)):
         if value:
             params_policy[name] = value
+    receipt_id = _derive_routed_policy(task, params['run_id'], params_policy)
     private = {}
     policy = build_policy(params_policy, config, private_secrets=private)
     if policy.model is None:
@@ -64,6 +135,8 @@ def build_kanban_policy(connection, params, config):
         goal_text='\n\n'.join(p for p in (task.title, task.body) if p), context=context,
         max_runtime_seconds=task.max_runtime_seconds, accept_hooks=True)
     context['db'] = str(path)
+    if receipt_id:
+        context['routing_receipt_id'] = receipt_id
     request = json.loads(policy.request_json)
     request.update(source='kanban', board=board, task_id=task.id, run_id=task.current_run_id)
     return replace(policy, source='kanban', platform='cli', toolsets=tuple(sorted(set(policy.toolsets) | {'kanban'})),
@@ -117,13 +190,23 @@ async def run_task(connection, params):
             # now; a reclaimed/closed task never reaches resume/submit.
             marker = conn.execute("SELECT payload FROM task_events WHERE task_id=? AND run_id=? AND kind='owner_admitted' ORDER BY id DESC LIMIT 1",
                                   (params['task_id'], params['run_id'])).fetchone()
+            task = kb.get_task(conn, params['task_id'])
             if marker:
                 if json.loads(marker[0])['session_id'] != ref.session_id:
                     raise RuntimeStoreError('stale_kanban_claim')
             else:
-                task = kb.get_task(conn, params['task_id'])
                 if not (task and task.status == 'running' and task.current_run_id == params['run_id'] and task.claim_lock == params['claim_lock']):
                     raise RuntimeStoreError('stale_kanban_claim')
+            # The routing re-check covers the saved-claim replay (a receipt link can change
+            # while the run id stays the same) and the same-run re-link TOCTOU on the live
+            # path: a receipted context is admitted only while the task row is still routed
+            # enforced AND still linked to the receipt the fence verified. A task that
+            # stopped being routed is admitted unrouted — the carrier's own rollback semantics.
+            receipt_id = context.get('routing_receipt_id')
+            if (receipt_id is not None and task is not None and task.routing_role
+                    and task.routing_mode == 'enforced' and task.routing_receipt_id != receipt_id):
+                raise _routing_blocked('stale_attempt')
+            if not marker:
                 kb._append_event(conn, task.id, 'owner_admitted',
                     {'db': owner_db, 'session_id': ref.session_id,
                      'request_id': request_id, 'pid': os.getpid(), 'birth': worker_birth(psutil.Process())},

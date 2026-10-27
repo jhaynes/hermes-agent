@@ -189,7 +189,7 @@ def route_runtime(policy, frozen, model, key, *, fallback=True):
             explicit_api_key=key, explicit_base_url=launch_url, target_model=model)
 
 
-def worker_route(policy, construct):
+def worker_route(policy, construct, *, fallback=True):
     """Child side: the ``api_key`` / ``base_url`` / ``api_mode`` overrides for the worker's agent, resolved
     as the in-process turn resolves its route (``route_runtime`` with the launch key, if one was bound),
     from this process's profile home (its HERMES_HOME and ``.env``). The frozen ``model.base_url`` alone
@@ -200,11 +200,17 @@ def worker_route(policy, construct):
 
     A primary AuthError walks the chain the agent will actually get: the owner's per-turn
     ``construct_v1`` chain (an ordinary session's refreshed profile fallbacks) when it was sent,
-    the frozen snapshot's otherwise (older owner)."""
+    the frozen snapshot's otherwise (older owner).
+
+    A kanban frame carrying a routing receipt never walks the chain: the receipted primary's
+    AuthError fails the request (crash accounting) instead of activating a route no receipt
+    authorizes; a mid-turn activation is contained by the per-request guard."""
     frozen, model = policy.effective()
     if 'fallback_model' in construct:
         frozen = {**frozen, 'fallback_providers': construct['fallback_model'] or [], 'fallback_model': None}
-    runtime, fallback_entry = route_runtime(policy, frozen, model, construct['api_key'])
+    if _kanban_routing_receipt_id(policy):
+        fallback = False
+    runtime, fallback_entry = route_runtime(policy, frozen, model, construct['api_key'], fallback=fallback)
     if fallback_entry is not None:
         return {}
     api_mode = runtime.get('api_mode')
@@ -217,6 +223,15 @@ def worker_route(policy, construct):
         api_mode = None
     return {'api_key': construct['api_key'] or runtime.get('api_key'), 'base_url': runtime.get('base_url'),
             'api_mode': api_mode}
+
+
+def _kanban_routing_receipt_id(policy):
+    """The routing receipt a kanban frame carries in its ``kanban_json`` context
+    (the owner's routing fence folded it at admission), or None. Unknown context
+    keys are invisible to readers that touch only the keys they know."""
+    context = json.loads(getattr(policy, 'kanban_json', None) or '{}')
+    receipt_id = context.get('routing_receipt_id') if isinstance(context, dict) else None
+    return receipt_id if isinstance(receipt_id, str) and receipt_id else None
 
 
 def checkpoint_agent_kwargs(config):

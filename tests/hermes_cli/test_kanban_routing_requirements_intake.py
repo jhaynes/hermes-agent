@@ -258,10 +258,8 @@ def test_requirements_capabilities_affect_eligibility(kanban_home, all_assignees
     must select that route even under a shallow task_class ranking that
     would otherwise prefer the shallow-only route."""
     _activate(kanban_home)
-    captured = {}
 
     def _fake_spawn(task, workspace):
-        captured["model"] = task.model_override
         return 1
 
     with kbc.connect() as conn:
@@ -275,8 +273,8 @@ def test_requirements_capabilities_affect_eligibility(kanban_home, all_assignees
         kbd.dispatch_once(conn, dry_run=False, spawn_fn=_fake_spawn)
         task = kb.get_task(conn, tid)
 
-    assert captured["model"] == "gpt-5"  # only openai-deep has tool_use
     decision = get_receipt(kanban_home, task.routing_receipt_id)
+    assert decision["selected"]["model"] == "gpt-5"  # only openai-deep has tool_use
     assert decision["selected"]["route_id"] == "openai-deep"
     assert decision["rejections"].get("openai-shallow") == ["missing_capabilities"]
 
@@ -314,10 +312,8 @@ def test_review_role_with_real_provenance_excludes_contributing_maker(
     'openai' must select the non-openai (anthropic) reviewer route — proving
     requirements-driven independence, not a static maker table."""
     _activate(kanban_home)
-    captured = {}
 
     def _fake_spawn(task, workspace):
-        captured["provider"] = task.provider_override
         return 1
 
     with kbc.connect() as conn:
@@ -337,8 +333,8 @@ def test_review_role_with_real_provenance_excludes_contributing_maker(
         res = kbd.dispatch_once(conn, dry_run=False, spawn_fn=_fake_spawn)
         task = kb.get_task(conn, tid)
 
-    assert captured["provider"] == "anthropic"
     decision = get_receipt(kanban_home, task.routing_receipt_id)
+    assert decision["selected"]["provider"] == "anthropic"
     assert decision["selected"]["route_id"] == "anthropic-review"
     assert decision["rejections"].get("openai-review") == ["contributing_maker"]
 
