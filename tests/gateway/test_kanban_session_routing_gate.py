@@ -340,6 +340,38 @@ def test_saved_claim_recheck_reads_current_row(kanban_env, monkeypatch):
     assert admitted == 1  # only the first admission's marker
 
 
+def test_row_relinked_to_other_receipt_fails_closed_at_worker_gate(kanban_env, monkeypatch):
+    """TOCTOU, worker side: the row is re-linked to a DIFFERENT valid receipt (same
+    task, same run) between first admission and the worker's construction. The
+    gate's live row read fails closed with stale_attempt before request 1 and
+    wires nothing — the per-request guard never runs, so 0 provider requests go
+    out. Sabotage: deleting the re-link comparison leaves the session gated under
+    a receipt the row no longer names, and this test fails on that mutation."""
+    from hermes_cli import kanban_db_connect as kbc
+
+    from agent.managed_worker import _wire_kanban_routing_receipt
+    from agent.model_selection_types import RoutingBlocked
+
+    guard_calls = []
+    monkeypatch.setattr("agent.managed_route_guard.enforce_managed_route_per_request",
+                        lambda *a, **k: guard_calls.append(1) or None)
+
+    tid, receipt_id = _gate_task_and_receipt(kanban_env)
+    # A different VALID receipt B (minted for another dispatch, as a concurrent
+    # re-resolution mints — the store refuses a second receipt on the same
+    # decision key), then CAS-set onto the live row the way the relink harness sets it.
+    foreign = _foreign_receipt(kanban_env, "t_worker_relink", "1")
+    with closing(kbc.connect(board="owned")) as conn:
+        conn.execute("UPDATE tasks SET routing_receipt_id=? WHERE id=?", (foreign, tid))
+        conn.commit()
+    agent = _gate_agent(model="gpt-5", provider="openai", base_url="https://api.openai.com/v1")
+    with pytest.raises(RoutingBlocked) as excinfo:
+        _wire_kanban_routing_receipt(agent, _gate_frame(tid, receipt_id))
+    assert excinfo.value.reason == "stale_attempt"
+    assert getattr(agent, "_managed_routing_receipt_id", None) is None  # nothing wired
+    assert guard_calls == []  # hard count: the per-request guard never ran — 0 requests
+
+
 def test_derouted_replay_runs_unrouted(kanban_env, monkeypatch):
     """A task de-routed between first admission and the saved-claim replay is
     admitted unrouted and the worker gate genuinely enforces nothing: the stale
