@@ -457,13 +457,43 @@ def _wire_kanban_routing_receipt(agent, frame):
     home = str(get_hermes_home())
     # Worker-side attempt binding: the receipt must name THIS task and run — a valid
     # receipt another dispatch carried in its context authorizes nothing here.
-    requirements = ((get_receipt(home, receipt_id) or {}).get('requirements') or {})
+    decision = get_receipt(home, receipt_id) or {}
+    requirements = decision.get('requirements') or {}
     if (requirements.get('execution_kind') != 'kanban'
             or requirements.get('execution_id') != context.get('task_id')
             or requirements.get('attempt_id') != str(context.get('run_id'))):
         raise RoutingBlocked('stale_attempt',
             f'routing receipt {receipt_id!r} does not bind this dispatch '
             f'(task {context.get("task_id")!r} run {context.get("run_id")!r})')
+    # Live routing state: the gate enforces the receipt only while the task row is
+    # STILL routed enforced AND still linked to it. admit_claim's re-check runs in the
+    # owner process — this is the worker's own read at construction time, so a task
+    # de-routed between first admission and a saved-claim replay is genuinely unrouted
+    # here (the carrier's rollback semantics: the stale receipt in the frozen context
+    # authorizes nothing) and a row re-linked to a different receipt fails closed.
+    from hermes_cli import kanban_db as kb
+    from hermes_cli.kanban_db_connect import connect_closing
+    with connect_closing(Path(context['db'])) as conn:
+        task = kb.get_task(conn, context['task_id'])
+    if task is None:
+        raise RoutingBlocked('stale_attempt',
+            f'task {context["task_id"]!r} no longer exists for receipt {receipt_id!r}')
+    if not task.routing_role or task.routing_mode != 'enforced':
+        return  # de-routed: runs unrouted, the stale receipt enforces nothing
+    if task.routing_receipt_id != receipt_id:
+        raise RoutingBlocked('stale_attempt',
+            f'task {context["task_id"]!r} is no longer linked to receipt {receipt_id!r}')
+    # ``endpoint_untrusted`` is minted HERE, at the kanban boundary, with the exact
+    # comparison the shared guard applies (only when the receipt names an endpoint):
+    # delegation and MoA keep the guard's shared reason for the same divergence, and
+    # the per-request guard below still re-checks the endpoint every later request.
+    # A blocked gate wires nothing: the attributes go on only after every check passed.
+    selected = decision.get('selected') or {}
+    actual_endpoint = getattr(agent, 'base_url', None) or None
+    if selected.get('endpoint') and actual_endpoint != selected['endpoint']:
+        raise RoutingBlocked('endpoint_untrusted',
+            f'constructed endpoint {actual_endpoint!r} does not match receipted '
+            f'endpoint {selected["endpoint"]!r}')
     agent._managed_routing_receipt_id = receipt_id
     agent._managed_routing_home = home
     # The gate reads the same derivation the per-request guard re-runs before every

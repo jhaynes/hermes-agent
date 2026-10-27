@@ -201,7 +201,10 @@ async def run_task(connection, params):
             # while the run id stays the same) and the same-run re-link TOCTOU on the live
             # path: a receipted context is admitted only while the task row is still routed
             # enforced AND still linked to the receipt the fence verified. A task that
-            # stopped being routed is admitted unrouted — the carrier's own rollback semantics.
+            # stopped being routed is admitted unrouted — the carrier's own rollback
+            # semantics: the stale receipt id stays frozen in the restored context, and the
+            # worker's construction-time gate re-reads the live row and unwires rather than
+            # enforcing it (_wire_kanban_routing_receipt).
             receipt_id = context.get('routing_receipt_id')
             if (receipt_id is not None and task is not None and task.routing_role
                     and task.routing_mode == 'enforced' and task.routing_receipt_id != receipt_id):

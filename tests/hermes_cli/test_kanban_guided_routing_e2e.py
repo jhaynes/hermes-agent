@@ -143,6 +143,56 @@ def test_cross_home_routed_dispatch_refused(kanban_home, all_assignees_spawnable
     assert res.spawned, "shadow dispatch is exempt from the same-home refusal"
 
 
+def test_missing_profile_dir_assignee_is_same_home_and_owner_backstop_refuses(
+    kanban_home, all_assignees_spawnable, monkeypatch,
+):
+    """The declared §2.1 deviation: an assignee whose profile dir does not exist
+    (``resolve_profile_env`` FileNotFoundError) is NOT cross-home — the spawn env
+    runs that worker in the origin home, so the store the fence reads IS the store
+    the worker's HERMES_HOME names. The dispatcher therefore mints normally, and
+    the owner's own backstop refuses the claim fail-closed with
+    invalid_kanban_claim instead of admitting a cross-profile session."""
+    from types import SimpleNamespace
+
+    from gateway.session_kanban import build_kanban_policy
+    from hermes_constants import get_hermes_home
+    from hermes_state_runtime import RuntimeStoreError
+
+    def _no_profile_dir(name):
+        raise FileNotFoundError(name)
+
+    monkeypatch.setattr("hermes_cli.profiles.resolve_profile_env", _no_profile_dir)
+    record = publish_policy(get_hermes_home(), _policy(), approval_ref="operator:test")
+    activate_policy(get_hermes_home(), "kanban-default", record["revision"])
+
+    def _spawn(task, workspace):
+        import os
+        return os.getpid()
+
+    with kbc.connect() as conn:
+        tid = kb.create_task(
+            conn, title="no-profile-dir card", assignee="alice", routing_role="builder",
+            routing_requirements={"input_tokens": 1000, "reserve_tokens": 8192},
+        )
+        res = kbd.dispatch_once(conn, dry_run=False, spawn_fn=_spawn)
+        task = kb.get_task(conn, tid)
+
+    assert res.spawned, "no-profile-dir assignee is same-home by construction, not refused"
+    assert task.routing_receipt_id  # minted and linked like any same-home routed dispatch
+
+    connection = SimpleNamespace(
+        authority=SimpleNamespace(profile_id=str(kanban_home)),
+        actor=SimpleNamespace(profile_id=str(kanban_home),
+                              capabilities=frozenset({"session:create"})),
+        native_owner=True)
+    params = dict(board=kb.DEFAULT_BOARD, task_id=tid, run_id=task.current_run_id,
+                  claim_lock=task.claim_lock)
+    with pytest.raises(RuntimeStoreError) as excinfo:
+        build_kanban_policy(connection, params, {"model": {"default": "loop-model",
+                                                           "provider": "custom"}})
+    assert excinfo.value.reason == "invalid_kanban_claim"  # the owner's fail-closed backstop
+
+
 def test_unmanaged_task_is_never_touched_by_routing(kanban_home, all_assignees_spawnable):
     """No routing_role -> zero guided-routing involvement; existing
     model_override/provider_override behavior is untouched."""
